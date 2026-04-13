@@ -1,0 +1,36 @@
+# Local development & IDEs
+.idea/
+.vscode/
+.history/
+*.swp
+*.bak
+.DS_Store
+Thumbs.db
+
+# OpenSpec
+openspec/changes/
+.openspec/
+openspec/tmp/
+!openspec/specs/
+!openspec/config.yaml
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+errored.tfstate
+crash.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+_override.tf
+_override.tf.json
+.terraformrc
+terraform.rc
+
+# Manter o lock file é boa prática
+!.terraform.lock.hcl
+# Manter arquivos de CI e Git
+!.gitignore
+!.github/
