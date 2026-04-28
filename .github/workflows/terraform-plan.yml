@@ -61,7 +61,7 @@ jobs:
 
       - name: Setup Terraform
         # Pin to SHA. Current tag: hashicorp/setup-terraform@v3
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269ef065
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
         with:
           terraform_version: '~> 1.5'
 

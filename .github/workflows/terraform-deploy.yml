@@ -35,7 +35,7 @@ jobs:
           service_account: ${{ secrets.WIF_SA }}
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269ef065
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
         with:
           terraform_version: '~> 1.5'
 
@@ -74,7 +74,7 @@ jobs:
           service_account: ${{ secrets.WIF_SA }}
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269ef065
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
         with:
           terraform_version: '~> 1.5'
 
