@@ -1,12 +1,47 @@
-variable "project_id"             { type = string }
-variable "name"                   { type = string; default = "app-hml" }
-variable "region"                 { type = string; default = "us-central1" }
-variable "db_password"            { type = string; sensitive = true }
-variable "api_secret_key"         { type = string; sensitive = true }
-variable "domain_name"            { type = string; default = null; nullable = true }
-variable "db_tier"                { type = string; default = "db-f1-micro" }
-variable "db_availability_type"   { type = string; default = "ZONAL" }
-variable "db_deletion_protection" { type = bool; default = false }
+variable "project_id" {
+  type = string
+}
+
+variable "name" {
+  type    = string
+  default = "app-hml"
+}
+
+variable "region" {
+  type    = string
+  default = "us-central1"
+}
+
+variable "db_password" {
+  type      = string
+  sensitive = true
+}
+
+variable "api_secret_key" {
+  type      = string
+  sensitive = true
+}
+
+variable "domain_name" {
+  type     = string
+  default  = null
+  nullable = true
+}
+
+variable "db_tier" {
+  type    = string
+  default = "db-f1-micro"
+}
+
+variable "db_availability_type" {
+  type    = string
+  default = "ZONAL"
+}
+
+variable "db_deletion_protection" {
+  type    = bool
+  default = false
+}
 
 module "platform" {
   source = "../../"
