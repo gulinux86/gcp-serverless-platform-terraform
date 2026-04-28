@@ -24,6 +24,11 @@ jobs:
     runs-on: ubuntu-latest
     environment: hml  # GitHub Environment — no protection rules
 
+    # Prevent concurrent HML deploys from racing on the Terraform state lock
+    concurrency:
+      group: terraform-hml
+      cancel-in-progress: false
+
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -39,17 +44,28 @@ jobs:
         with:
           terraform_version: '~> 1.5'
 
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
       - name: Terraform Init
         working-directory: environments/hml
         run: terraform init -input=false
 
-      - name: Terraform Apply
+      - name: Terraform Validate
         working-directory: environments/hml
-        run: terraform apply -auto-approve -input=false
+        run: terraform validate
+
+      - name: Terraform Plan
+        working-directory: environments/hml
+        run: terraform plan -out=tfplan -input=false
         env:
           TF_VAR_project_id: ${{ secrets.PROJECT_ID }}
           TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
           TF_VAR_api_secret_key: ${{ secrets.API_SECRET_KEY }}
+
+      - name: Terraform Apply
+        working-directory: environments/hml
+        run: terraform apply -auto-approve tfplan
 
   # ─────────────────────────────────────────────────────────────────────────────
   # PROD — gated deploy on every merge to main
@@ -63,6 +79,17 @@ jobs:
     runs-on: ubuntu-latest
     environment: prod  # GitHub Environment — required reviewer + restricted to main
 
+    # Prevent concurrent PROD deploys from racing on the Terraform state lock
+    concurrency:
+      group: terraform-prod
+      cancel-in-progress: false
+
+    # Hoisted to job level — shared by Plan and Apply steps
+    env:
+      TF_VAR_project_id: ${{ secrets.PROJECT_ID }}
+      TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+      TF_VAR_api_secret_key: ${{ secrets.API_SECRET_KEY }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -82,21 +109,11 @@ jobs:
         working-directory: environments/prod
         run: terraform init -input=false
 
-      # Run plan explicitly so the output is visible in workflow logs before apply.
-      # The reviewer approved the deployment before this job started; the plan
-      # output here confirms what will change.
+      # Save the exact plan so Apply executes what was reviewed — not a re-plan
       - name: Terraform Plan
         working-directory: environments/prod
-        run: terraform plan -no-color -input=false
-        env:
-          TF_VAR_project_id: ${{ secrets.PROJECT_ID }}
-          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
-          TF_VAR_api_secret_key: ${{ secrets.API_SECRET_KEY }}
+        run: terraform plan -out=tfplan -no-color -input=false
 
       - name: Terraform Apply
         working-directory: environments/prod
-        run: terraform apply -auto-approve -input=false
-        env:
-          TF_VAR_project_id: ${{ secrets.PROJECT_ID }}
-          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
-          TF_VAR_api_secret_key: ${{ secrets.API_SECRET_KEY }}
+        run: terraform apply -auto-approve tfplan

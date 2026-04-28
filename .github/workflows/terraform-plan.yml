@@ -16,6 +16,11 @@ permissions:
   id-token: write
   pull-requests: write
 
+# Cancel in-progress plan when a new commit is pushed to the same PR
+concurrency:
+  group: terraform-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   plan:
     name: Plan (${{ github.base_ref == 'main' && 'prod' || 'hml' }})
@@ -39,8 +44,8 @@ jobs:
         run: |
           echo "WIF_PROVIDER=${{ secrets.HML_WIF_PROVIDER }}" >> $GITHUB_ENV
           echo "WIF_SA=${{ secrets.HML_WIF_SA }}"             >> $GITHUB_ENV
-          echo "TF_VAR_project_id=${{ secrets.HML_PROJECT_ID }}"     >> $GITHUB_ENV
-          echo "TF_VAR_db_password=${{ secrets.HML_DB_PASSWORD }}"   >> $GITHUB_ENV
+          echo "TF_VAR_project_id=${{ secrets.HML_PROJECT_ID }}"         >> $GITHUB_ENV
+          echo "TF_VAR_db_password=${{ secrets.HML_DB_PASSWORD }}"       >> $GITHUB_ENV
           echo "TF_VAR_api_secret_key=${{ secrets.HML_API_SECRET_KEY }}" >> $GITHUB_ENV
 
       - name: Set PROD credentials
@@ -48,8 +53,8 @@ jobs:
         run: |
           echo "WIF_PROVIDER=${{ secrets.PROD_WIF_PROVIDER }}" >> $GITHUB_ENV
           echo "WIF_SA=${{ secrets.PROD_WIF_SA }}"             >> $GITHUB_ENV
-          echo "TF_VAR_project_id=${{ secrets.PROD_PROJECT_ID }}"     >> $GITHUB_ENV
-          echo "TF_VAR_db_password=${{ secrets.PROD_DB_PASSWORD }}"   >> $GITHUB_ENV
+          echo "TF_VAR_project_id=${{ secrets.PROD_PROJECT_ID }}"         >> $GITHUB_ENV
+          echo "TF_VAR_db_password=${{ secrets.PROD_DB_PASSWORD }}"       >> $GITHUB_ENV
           echo "TF_VAR_api_secret_key=${{ secrets.PROD_API_SECRET_KEY }}" >> $GITHUB_ENV
 
       - name: Authenticate to GCP via Workload Identity Federation
@@ -79,8 +84,8 @@ jobs:
       - name: Terraform Plan
         id: plan
         working-directory: ${{ env.ENV_DIR }}
-        # set +e: allow non-zero exit (plan with changes = exit 2) without
-        # aborting the step so we can still post the comment.
+        # set +e: allow non-zero exit without aborting the step so we can post the comment.
+        # Exit codes: 0 = no changes, 1 = error, 2 = changes present (all non-1 are ok)
         run: |
           touch /tmp/plan_output.txt
           set +e
@@ -102,7 +107,8 @@ jobs:
             const plan = raw.length > maxLen
               ? raw.substring(0, maxLen) + '\n\n... (output truncated — see workflow logs for full plan)'
               : raw;
-            const ok = process.env.PLAN_EXITCODE === '0';
+            // exit 0 = no changes, exit 2 = changes present — both are successful plans
+            const ok = process.env.PLAN_EXITCODE !== '1';
             const tag = '<!-- tf-plan-bot -->';
             const body = [
               tag,
