@@ -32,3 +32,21 @@ variable "domain_name" {
   description = "Domain name for DNS (Optional)"
   default     = null
 }
+
+variable "db_tier" {
+  type        = string
+  description = "Cloud SQL instance tier (e.g., db-f1-micro, db-g1-small)"
+  default     = "db-f1-micro"
+}
+
+variable "db_availability_type" {
+  type        = string
+  description = "Cloud SQL availability type: ZONAL or REGIONAL"
+  default     = "ZONAL"
+}
+
+variable "db_deletion_protection" {
+  type        = bool
+  description = "Enable deletion protection on the Cloud SQL instance"
+  default     = false
+}

@@ -47,3 +47,26 @@ variable "domain_name" {
   default     = null
   nullable    = true
 }
+
+variable "db_tier" {
+  type        = string
+  description = "Cloud SQL instance tier (e.g., db-f1-micro, db-g1-small)"
+  default     = "db-f1-micro"
+}
+
+variable "db_availability_type" {
+  type        = string
+  description = "Cloud SQL availability type: ZONAL (single-zone) or REGIONAL (HA with standby replica)"
+  default     = "ZONAL"
+
+  validation {
+    condition     = contains(["ZONAL", "REGIONAL"], var.db_availability_type)
+    error_message = "db_availability_type must be ZONAL or REGIONAL."
+  }
+}
+
+variable "db_deletion_protection" {
+  type        = bool
+  description = "Enable deletion protection on the Cloud SQL instance. Set true for PROD."
+  default     = false
+}

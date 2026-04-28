@@ -1,0 +1,147 @@
+name: Terraform Plan
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+    paths:
+      - '**.tf'
+      - '**.tfvars.example'
+      - '.github/workflows/terraform-*.yml'
+
+# Minimal permissions — id-token for WIF, pull-requests to post comment
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  plan:
+    name: Plan (${{ github.base_ref == 'main' && 'prod' || 'hml' }})
+    runs-on: ubuntu-latest
+
+    env:
+      ENV_NAME: ${{ github.base_ref == 'main' && 'prod' || 'hml' }}
+      ENV_DIR: ${{ github.base_ref == 'main' && 'environments/prod' || 'environments/hml' }}
+
+    steps:
+      - name: Checkout
+        # Pin to SHA for supply-chain security. Update when upgrading.
+        # Current tag: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      # Set environment-specific variables from prefixed repo secrets.
+      # Using two steps (instead of inline ternary) because GitHub Actions
+      # expressions cannot select between two secrets in a single expression.
+      - name: Set HML credentials
+        if: github.base_ref == 'develop'
+        run: |
+          echo "WIF_PROVIDER=${{ secrets.HML_WIF_PROVIDER }}" >> $GITHUB_ENV
+          echo "WIF_SA=${{ secrets.HML_WIF_SA }}"             >> $GITHUB_ENV
+          echo "TF_VAR_project_id=${{ secrets.HML_PROJECT_ID }}"     >> $GITHUB_ENV
+          echo "TF_VAR_db_password=${{ secrets.HML_DB_PASSWORD }}"   >> $GITHUB_ENV
+          echo "TF_VAR_api_secret_key=${{ secrets.HML_API_SECRET_KEY }}" >> $GITHUB_ENV
+
+      - name: Set PROD credentials
+        if: github.base_ref == 'main'
+        run: |
+          echo "WIF_PROVIDER=${{ secrets.PROD_WIF_PROVIDER }}" >> $GITHUB_ENV
+          echo "WIF_SA=${{ secrets.PROD_WIF_SA }}"             >> $GITHUB_ENV
+          echo "TF_VAR_project_id=${{ secrets.PROD_PROJECT_ID }}"     >> $GITHUB_ENV
+          echo "TF_VAR_db_password=${{ secrets.PROD_DB_PASSWORD }}"   >> $GITHUB_ENV
+          echo "TF_VAR_api_secret_key=${{ secrets.PROD_API_SECRET_KEY }}" >> $GITHUB_ENV
+
+      - name: Authenticate to GCP via Workload Identity Federation
+        # Pin to SHA. Current tag: google-github-actions/auth@v2
+        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SA }}
+
+      - name: Setup Terraform
+        # Pin to SHA. Current tag: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: '~> 1.5'
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        working-directory: ${{ env.ENV_DIR }}
+        run: terraform init -input=false
+
+      - name: Terraform Validate
+        working-directory: ${{ env.ENV_DIR }}
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: ${{ env.ENV_DIR }}
+        # set +e: allow non-zero exit (plan with changes = exit 2) without
+        # aborting the step so we can still post the comment.
+        run: |
+          touch /tmp/plan_output.txt
+          set +e
+          terraform plan -no-color -input=false 2>&1 | tee /tmp/plan_output.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+          set -e
+
+      - name: Post Plan as PR Comment
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        if: always()
+        env:
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+        with:
+          script: |
+            const fs = require('fs');
+            const raw = fs.readFileSync('/tmp/plan_output.txt', 'utf8');
+            // Truncate to stay within GitHub comment limits (65 536 chars)
+            const maxLen = 60000;
+            const plan = raw.length > maxLen
+              ? raw.substring(0, maxLen) + '\n\n... (output truncated — see workflow logs for full plan)'
+              : raw;
+            const ok = process.env.PLAN_EXITCODE === '0';
+            const tag = '<!-- tf-plan-bot -->';
+            const body = [
+              tag,
+              `### ${ok ? '✅' : '❌'} Terraform Plan — \`${{ env.ENV_NAME }}\``,
+              '',
+              '<details><summary>Show Plan Output</summary>',
+              '',
+              '```',
+              plan,
+              '```',
+              '',
+              '</details>',
+              '',
+              `*Triggered by @${{ github.actor }} on \`${{ github.head_ref }}\`*`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(tag));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail if plan errored
+        # Exit code 2 = plan succeeded with changes (ok), 1 = error (fail)
+        if: steps.plan.outputs.exitcode == '1'
+        run: exit 1

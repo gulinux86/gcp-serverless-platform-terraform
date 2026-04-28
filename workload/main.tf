@@ -59,10 +59,10 @@ module "database" {
   database_name       = "appdb"
   db_user             = "appuser"
   db_password         = var.db_password
-  tier                = "db-f1-micro"
-  availability_type   = "REGIONAL"
+  tier                = var.db_tier
+  availability_type   = var.db_availability_type
   public_ip           = false
-  deletion_protection = false
+  deletion_protection = var.db_deletion_protection
   vpc_network_id      = var.vpc_network_id
   vpc_peering_id      = var.vpc_peering_id
 }
