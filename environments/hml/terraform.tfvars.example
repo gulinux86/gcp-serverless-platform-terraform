@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and fill in secret values.
+# terraform.tfvars is gitignored — never commit it.
+# In CI, db_password and api_secret_key are injected as TF_VAR_* from GitHub Secrets.
+
+project_id             = "project-ccb8f609-7f01-4720-8cf"
+name                   = "app-hml"
+region                 = "us-central1"
+db_tier                = "db-f1-micro"
+db_availability_type   = "ZONAL"
+db_deletion_protection = false
+db_password            = "FILL_IN"
+api_secret_key         = "FILL_IN"

@@ -1,0 +1,102 @@
+name: Terraform Deploy
+
+on:
+  push:
+    branches:
+      - develop  # → auto-apply HML
+      - main     # → gated apply PROD (requires reviewer approval via GitHub Environment)
+    paths:
+      - '**.tf'
+      - '**.tfvars.example'
+      - '.github/workflows/terraform-*.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # HML — automatic deploy on every merge to develop
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy-hml:
+    name: Deploy HML
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: hml  # GitHub Environment — no protection rules
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Authenticate to GCP via Workload Identity Federation
+        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SA }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269ef065
+        with:
+          terraform_version: '~> 1.5'
+
+      - name: Terraform Init
+        working-directory: environments/hml
+        run: terraform init -input=false
+
+      - name: Terraform Apply
+        working-directory: environments/hml
+        run: terraform apply -auto-approve -input=false
+        env:
+          TF_VAR_project_id: ${{ secrets.PROJECT_ID }}
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          TF_VAR_api_secret_key: ${{ secrets.API_SECRET_KEY }}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # PROD — gated deploy on every merge to main
+  # The GitHub Environment "prod" has required reviewers configured.
+  # The entire job (including the plan step) is paused until a reviewer approves.
+  # Reviewers can inspect the PR's plan comment before approving.
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy PROD
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: prod  # GitHub Environment — required reviewer + restricted to main
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Authenticate to GCP via Workload Identity Federation
+        uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SA }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269ef065
+        with:
+          terraform_version: '~> 1.5'
+
+      - name: Terraform Init
+        working-directory: environments/prod
+        run: terraform init -input=false
+
+      # Run plan explicitly so the output is visible in workflow logs before apply.
+      # The reviewer approved the deployment before this job started; the plan
+      # output here confirms what will change.
+      - name: Terraform Plan
+        working-directory: environments/prod
+        run: terraform plan -no-color -input=false
+        env:
+          TF_VAR_project_id: ${{ secrets.PROJECT_ID }}
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          TF_VAR_api_secret_key: ${{ secrets.API_SECRET_KEY }}
+
+      - name: Terraform Apply
+        working-directory: environments/prod
+        run: terraform apply -auto-approve -input=false
+        env:
+          TF_VAR_project_id: ${{ secrets.PROJECT_ID }}
+          TF_VAR_db_password: ${{ secrets.DB_PASSWORD }}
+          TF_VAR_api_secret_key: ${{ secrets.API_SECRET_KEY }}

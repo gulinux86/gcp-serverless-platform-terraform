@@ -27,6 +27,10 @@ module "workload" {
   api_secret_key = var.api_secret_key
   domain_name    = var.domain_name
 
+  db_tier                = var.db_tier
+  db_availability_type   = var.db_availability_type
+  db_deletion_protection = var.db_deletion_protection
+
   # Link Foundation Outputs to Workload Inputs
   vpc_network_id    = module.foundation.vpc_network_id
   private_subnet_id = module.foundation.private_subnet_id
