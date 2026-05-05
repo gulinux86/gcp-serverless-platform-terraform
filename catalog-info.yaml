@@ -1,0 +1,22 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: gcp-serverless-platform-terraform
+  title: GCP Serverless Platform — Infrastructure
+  description: >
+    Terraform infrastructure for the GCP Serverless Platform.
+    Manages VPC, Cloud SQL, Cloud Run, Secret Manager, Cloud Armor, and CI/CD pipelines
+    for HML and PROD environments using Workload Identity Federation.
+  tags:
+    - terraform
+    - gcp
+    - infrastructure
+    - platform
+  annotations:
+    github.com/project-slug: gulinux86/gcp-serverless-platform-terraform
+    backstage.io/techdocs-ref: dir:.
+spec:
+  type: library
+  lifecycle: production
+  owner: group:default/platform-team
+  system: platform-demo
