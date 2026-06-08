@@ -1,0 +1,97 @@
+name: terraform-destroy
+
+# Manual, controlled teardown: you pick the environment and layer when you run it.
+# Destructive — gated by a typed confirmation and, for PROD, by the `prod` GitHub
+# Environment (required reviewer). Shares the `terraform-<env>` concurrency group
+# with terraform-deploy so a destroy can never overlap an apply for the same env.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options: [hml, prod]
+      layer:
+        description: "Which layer(s) to destroy"
+        required: true
+        default: workload
+        type: choice
+        options: [foundation, workload, both]
+      confirm:
+        description: "Type the environment name (hml/prod) to confirm destroy"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write # OIDC -> Workload Identity Federation
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    # Ties to the GitHub Environment: `prod` carries the required reviewer, so a
+    # prod run pauses for approval before this job starts.
+    environment: ${{ github.event.inputs.environment }}
+    concurrency:
+      group: terraform-${{ github.event.inputs.environment }}
+      cancel-in-progress: false
+    env:
+      ENVIRONMENT: ${{ github.event.inputs.environment }}
+    steps:
+      - name: Confirm destroy
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "$ENVIRONMENT" ]; then
+            echo "Confirmation '${{ github.event.inputs.confirm }}' does not match environment '$ENVIRONMENT'. Aborting." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
+
+      - name: Select environment auth
+        run: |
+          if [ "$ENVIRONMENT" = "prod" ]; then
+            echo "WIF_PROVIDER=${{ secrets.PROD_WIF_PROVIDER }}" >> "$GITHUB_ENV"
+            echo "DEPLOYER_SA=${{ secrets.PROD_DEPLOYER_SA }}" >> "$GITHUB_ENV"
+            echo "TF_VAR_db_password=${{ secrets.PROD_DB_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "TF_VAR_api_secret_key=${{ secrets.PROD_API_SECRET_KEY }}" >> "$GITHUB_ENV"
+          else
+            echo "WIF_PROVIDER=${{ secrets.HML_WIF_PROVIDER }}" >> "$GITHUB_ENV"
+            echo "DEPLOYER_SA=${{ secrets.HML_DEPLOYER_SA }}" >> "$GITHUB_ENV"
+            echo "TF_VAR_db_password=${{ secrets.HML_DB_PASSWORD }}" >> "$GITHUB_ENV"
+            echo "TF_VAR_api_secret_key=${{ secrets.HML_API_SECRET_KEY }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Authenticate to GCP (Workload Identity Federation)
+        uses: google-github-actions/auth@v2 # TODO: pin to a commit SHA
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER_SA }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Resolve layers
+        run: |
+          # "both" must destroy workload BEFORE foundation (reverse of apply):
+          # workload depends on foundation's state and on live network resources.
+          if [ "${{ github.event.inputs.layer }}" = "both" ]; then
+            echo "LAYERS=workload foundation" >> "$GITHUB_ENV"
+          else
+            echo "LAYERS=${{ github.event.inputs.layer }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Destroy
+        run: |
+          set -euo pipefail
+          for L in $LAYERS; do
+            echo "::group::terraform destroy $L ($ENVIRONMENT)"
+            terraform -chdir="$L" init -input=false \
+              -backend-config="environments/${ENVIRONMENT}/backend.hcl"
+            terraform -chdir="$L" destroy -auto-approve -input=false \
+              -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
+            echo "::endgroup::"
+          done

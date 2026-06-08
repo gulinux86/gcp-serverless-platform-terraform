@@ -6,9 +6,8 @@
 module "vpc" {
   source = "../modules/foundation/vpc"
 
-  name                           = "${var.name}-vpc"
-  region                         = var.region
-  serverless_decommission_signal = var.serverless_decommission_signal
+  name   = "${var.name}-vpc"
+  region = var.region
 }
 
 # Cloud Firewall

@@ -28,6 +28,9 @@ resource "google_sql_database_instance" "this" {
     ip_configuration {
       ipv4_enabled    = false
       private_network = var.vpc_network_id
+      # Require TLS for all connections (no unencrypted traffic). Addresses
+      # AVD-GCP-0015; enforces encryption in transit to the database.
+      ssl_mode = var.ssl_mode
     }
 
     database_flags {

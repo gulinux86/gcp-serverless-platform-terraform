@@ -1,0 +1,70 @@
+name: Terraform Module Tests
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+    paths:
+      - "modules/**"
+      - ".github/workflows/terraform-*.yml"
+  push:
+    branches:
+      - develop
+      - main
+    paths:
+      - "modules/**"
+
+# Read-only — no GCP credentials, no state writes
+permissions:
+  contents: read
+
+# Cancel in-progress test run when a new commit is pushed to the same PR
+concurrency:
+  group: terraform-test-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: "Test / ${{ matrix.module }}"
+    runs-on: ubuntu-latest
+
+    strategy:
+      # Run all modules even if one fails — full picture of what broke
+      fail-fast: false
+      matrix:
+        module:
+          - modules/foundation/vpc
+          - modules/foundation/cloud_firewall
+          - modules/workload/cloud_armor
+          - modules/workload/cloud_run_service
+          - modules/workload/https_load_balancer
+          - modules/workload/iam_service_account
+          - modules/workload/cloud_sql
+
+    steps:
+      - name: Checkout
+        # Pin to SHA for supply-chain security — same posture as terraform-plan.yml
+        # Current tag: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Setup Terraform
+        # mock_provider requires Terraform >= 1.7.0 — cannot use ~> 1.5 here.
+        # The plan/deploy pipelines stay on ~> 1.5 since they target root modules
+        # with real backends. Module tests are independent and need the newer version.
+        # Current tag: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: "~> 1.9"
+
+      - name: Terraform Init
+        working-directory: ${{ matrix.module }}
+        # -backend=false: modules have no backend configuration.
+        # Without this flag terraform init exits with an error.
+        run: terraform init -backend=false
+
+      - name: Terraform Test
+        working-directory: ${{ matrix.module }}
+        # No GCP credentials required — all tests use mock_provider + command=plan.
+        # The provider binary is downloaded by init but never called during tests.
+        run: terraform test

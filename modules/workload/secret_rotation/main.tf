@@ -29,9 +29,9 @@ resource "google_pubsub_topic_iam_member" "this" {
 }
 
 resource "google_cloud_run_v2_job" "this" {
-  name               = "${var.name}-secret-rotation-handler"
-  project            = var.project_id
-  location           = var.region
+  name                = "${var.name}-secret-rotation-handler"
+  project             = var.project_id
+  location            = var.region
   deletion_protection = false
 
   template {
