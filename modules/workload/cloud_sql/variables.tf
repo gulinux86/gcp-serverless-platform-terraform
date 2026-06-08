@@ -92,6 +92,17 @@ variable "max_connections" {
   default     = "100"
 }
 
+variable "ssl_mode" {
+  description = "TLS enforcement for connections. ENCRYPTED_ONLY requires TLS without a client cert; TRUSTED_CLIENT_CERTIFICATE_REQUIRED also requires a client cert. ALLOW_UNENCRYPTED_AND_ENCRYPTED disables enforcement (not recommended)."
+  type        = string
+  default     = "ENCRYPTED_ONLY"
+
+  validation {
+    condition     = contains(["ENCRYPTED_ONLY", "TRUSTED_CLIENT_CERTIFICATE_REQUIRED", "ALLOW_UNENCRYPTED_AND_ENCRYPTED"], var.ssl_mode)
+    error_message = "ssl_mode must be one of: ENCRYPTED_ONLY, TRUSTED_CLIENT_CERTIFICATE_REQUIRED, ALLOW_UNENCRYPTED_AND_ENCRYPTED."
+  }
+}
+
 variable "deletion_protection" {
   description = "Deletion protection"
   type        = bool
