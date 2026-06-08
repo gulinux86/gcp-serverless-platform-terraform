@@ -1,6 +1,6 @@
 # cloud_run_service
 
-Cloud Run v2 service with Direct VPC Egress, optional GCS FUSE volume mount, and Secret Manager environment variable injection. Configures ingress restriction, min-instance scaling, and a per-service destroy cooldown for safe subnet deletion.
+Cloud Run v2 service that egresses to the VPC through a Serverless VPC Access Connector, with an optional GCS FUSE volume mount and Secret Manager environment variable injection. Configures ingress restriction and min-instance scaling.
 
 ## Usage
 
@@ -15,7 +15,7 @@ module "backend" {
   make_public           = false
   min_instance_count    = 1
   service_account_email = module.backend_sa.email
-  vpc_subnet_id         = var.private_subnet_id
+  vpc_connector_id      = var.vpc_connector_id
 
   env_vars = {
     DATABASE_URL = "postgresql://user@/dbname?host=/cloudsql/project:region:instance"
@@ -32,18 +32,15 @@ module "backend" {
 
 ## Known Behaviors
 
-### Direct VPC Egress IP reservation cooldown
+### VPC Connector egress
 
-When a Cloud Run v2 service uses Direct VPC Egress, GCP internally reserves IP addresses (`serverless-ipv4-*`) on the subnet. These reservations are **not released immediately** when the Cloud Run service is deleted — GCP holds them for up to 120 minutes. During this window, `terraform destroy` will fail when attempting to delete the subnet:
-
-```
-Error: The subnetwork resource '...app-vpc-private' is already being used by
-'...addresses/serverless-ipv4-1234567890'
-```
-
-This module includes a `time_sleep` resource with a 150-second destroy duration to delay module completion after Cloud Run is deleted, giving GCP time to start releasing reservations. However, 150 seconds is insufficient for the full 120-minute window.
-
-**Recommended destroy pattern**: use two phases — destroy workload first, wait for GCP to release reservations, then destroy foundation. See the root `README.md` for the full two-phase destroy procedure.
+The service routes egress through the Serverless VPC Access Connector passed in
+`vpc_connector_id` (created in the foundation `vpc` module). `egress = ALL_TRAFFIC`
+sends all outbound traffic through the VPC so private destinations (e.g. Cloud SQL
+over PSA) stay off the public internet. When `vpc_connector_id` is `null`, no
+`vpc_access` block is rendered. Unlike Direct VPC Egress, the connector holds no
+per-service IP reservations in the application subnet, so there is no destroy-time
+IP-release cooldown.
 
 ### `make_public` default
 
@@ -63,7 +60,6 @@ No requirements.
 | Name | Version |
 |------|---------|
 | <a name="provider_google"></a> [google](#provider\_google) | n/a |
-| <a name="provider_time"></a> [time](#provider\_time) | n/a |
 
 ## Modules
 
@@ -75,7 +71,6 @@ No modules.
 |------|------|
 | [google_cloud_run_v2_service.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/cloud_run_v2_service) | resource |
 | [google_cloud_run_v2_service_iam_member.noauth](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/cloud_run_v2_service_iam_member) | resource |
-| [time_sleep.wait_for_ip_release](https://registry.terraform.io/providers/hashicorp/time/latest/docs/resources/sleep) | resource |
 
 ## Inputs
 
@@ -94,13 +89,12 @@ No modules.
 | <a name="input_region"></a> [region](#input\_region) | Deployment region | `string` | `"us-central1"` | no |
 | <a name="input_secret_env_vars"></a> [secret\_env\_vars](#input\_secret\_env\_vars) | Map of env var name to Secret Manager secret reference. Each entry injects the secret value as an environment variable without exposing it as plain text. | <pre>map(object({<br/>    secret  = string<br/>    version = string<br/>  }))</pre> | `{}` | no |
 | <a name="input_service_account_email"></a> [service\_account\_email](#input\_service\_account\_email) | Service account email | `string` | `null` | no |
-| <a name="input_vpc_subnet_id"></a> [vpc\_subnet\_id](#input\_vpc\_subnet\_id) | VPC Subnet ID for Direct VPC Egress | `string` | `null` | no |
+| <a name="input_vpc_connector_id"></a> [vpc\_connector\_id](#input\_vpc\_connector\_id) | Serverless VPC Access Connector ID for Cloud Run egress into the VPC. When null, no vpc\_access block is rendered. | `string` | `null` | no |
 
 ## Outputs
 
 | Name | Description |
 |------|-------------|
-| <a name="output_decommission_signal"></a> [decommission\_signal](#output\_decommission\_signal) | Signal indicating that the service and its cooldown are finished |
 | <a name="output_name"></a> [name](#output\_name) | Cloud Run service name |
 | <a name="output_service_url"></a> [service\_url](#output\_service\_url) | Public URL of the Cloud Run service |
 <!-- END_TF_DOCS -->

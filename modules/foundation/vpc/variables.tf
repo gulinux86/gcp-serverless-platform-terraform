@@ -39,9 +39,26 @@ variable "log_flow_sampling" {
   default     = 0.5
 }
 
-variable "serverless_decommission_signal" {
-  type        = map(string)
-  description = "Signal from the workload layer indicating serverless IP cooldowns are complete. When provided, the private subnetwork will depend on it to enforce correct destruction ordering."
-  default     = null
-  nullable    = true
+variable "connector_cidr" {
+  description = "Dedicated /28 CIDR for the Serverless VPC Access Connector. Must not overlap the private subnets or the PSA range."
+  type        = string
+  default     = "10.8.0.0/28"
+}
+
+variable "connector_min_instances" {
+  description = "Minimum number of connector instances (>= 2)."
+  type        = number
+  default     = 2
+}
+
+variable "connector_max_instances" {
+  description = "Maximum number of connector instances (> min_instances)."
+  type        = number
+  default     = 3
+}
+
+variable "connector_machine_type" {
+  description = "Machine type for the connector instances."
+  type        = string
+  default     = "e2-micro"
 }

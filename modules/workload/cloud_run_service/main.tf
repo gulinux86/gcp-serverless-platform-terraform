@@ -4,10 +4,6 @@ resource "google_cloud_run_v2_service" "this" {
   deletion_protection = false
   ingress             = var.ingress
 
-  # Ensures the IP release cooldown is destroyed AFTER Cloud Run on terraform destroy.
-  # Create order: timer → Cloud Run | Destroy order: Cloud Run → timer waits 150s
-  depends_on = [time_sleep.wait_for_ip_release]
-
   template {
     service_account = var.service_account_email
 
@@ -15,11 +11,15 @@ resource "google_cloud_run_v2_service" "this" {
       min_instance_count = var.min_instance_count
     }
 
-    vpc_access {
-      network_interfaces {
-        subnetwork = var.vpc_subnet_id
+    # Egress to the VPC via the Serverless VPC Access Connector. Unlike Direct VPC
+    # Egress, the connector holds no per-service IP reservations in the app
+    # subnets, so no IP-release cooldown is needed on destroy.
+    dynamic "vpc_access" {
+      for_each = var.vpc_connector_id != null ? [1] : []
+      content {
+        connector = var.vpc_connector_id
+        egress    = "ALL_TRAFFIC"
       }
-      egress = "ALL_TRAFFIC"
     }
 
     containers {
@@ -83,11 +83,4 @@ resource "google_cloud_run_v2_service_iam_member" "noauth" {
   name     = google_cloud_run_v2_service.this.name
   role     = "roles/run.invoker"
   member   = "allUsers"
-}
-
-# Cooldown to ensure GCP releases Direct VPC Egress IP reservations after destruction.
-# Destroy order: Cloud Run deleted → timer waits → module fully destroyed.
-# Foundation's subnet can only be deleted after the workload module (including this timer) is gone.
-resource "time_sleep" "wait_for_ip_release" {
-  destroy_duration = "150s"
 }

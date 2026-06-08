@@ -7,12 +7,12 @@
 .DS_Store
 Thumbs.db
 
-# OpenSpec
-openspec/changes/
-.openspec/
-openspec/tmp/
-!openspec/specs/
-!openspec/config.yaml
+# OpenSpec — local tooling only, not part of the published project
+openspec/
+
+# Agent tooling — local only, not part of the published project
+.claude/
+.gemini/
 
 # Terraform
 **/.terraform/

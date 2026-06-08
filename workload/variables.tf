@@ -26,19 +26,18 @@ variable "api_secret_key" {
   sensitive   = true
 }
 
-variable "vpc_network_id" {
+# Networking attributes (vpc_network_id, private_subnet_id, vpc_peering_id) are no
+# longer injected by a root module. They are read from the foundation layer's
+# remote state (see remote_state.tf) and exposed as locals in main.tf.
+
+variable "state_bucket" {
   type        = string
-  description = "VPC network ID"
+  description = "GCS bucket holding the Terraform state for all layers. Used to read the foundation layer's remote state."
 }
 
-variable "private_subnet_id" {
+variable "environment" {
   type        = string
-  description = "Private Subnet ID for Direct VPC Egress"
-}
-
-variable "vpc_peering_id" {
-  type        = string
-  description = "VPC Peering/PSA connection ID for explicit dependency"
+  description = "Environment name (e.g. hml, prod). Selects the foundation remote-state prefix (<environment>/foundation)."
 }
 
 variable "domain_name" {

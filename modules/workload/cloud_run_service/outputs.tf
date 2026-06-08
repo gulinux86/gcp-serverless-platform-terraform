@@ -7,8 +7,3 @@ output "name" {
   description = "Cloud Run service name"
   value       = var.name
 }
-
-output "decommission_signal" {
-  description = "Signal indicating that the service and its cooldown are finished"
-  value       = time_sleep.wait_for_ip_release.id
-}

@@ -4,12 +4,19 @@ resource "google_compute_network" "this" {
   routing_mode            = var.routing_mode
 }
 
-# Holds the workload decommission signal so the subnetwork can depend on it as a resource.
-# When var.serverless_decommission_signal is provided, this resource is only considered
-# destroyed after the workload's 90s IP-release cooldown has completed.
-resource "terraform_data" "serverless_signal" {
-  count = var.serverless_decommission_signal != null ? 1 : 0
-  input = var.serverless_decommission_signal
+# Serverless VPC Access Connector — the egress path Cloud Run uses to reach the
+# VPC. Replaces Direct VPC Egress: the connector is a managed resource with its
+# own dedicated /28, so no per-service IP reservations linger in the application
+# subnets on destroy. This removes the need for the workload IP-release cooldowns
+# (time_sleep guards) and the serverless_decommission_signal handshake.
+resource "google_vpc_access_connector" "this" {
+  name          = "${var.name}-connector"
+  region        = var.region
+  network       = google_compute_network.this.name
+  ip_cidr_range = var.connector_cidr
+  min_instances = var.connector_min_instances
+  max_instances = var.connector_max_instances
+  machine_type  = var.connector_machine_type
 }
 
 resource "google_compute_subnetwork" "private" {
@@ -27,10 +34,10 @@ resource "google_compute_subnetwork" "private" {
   }
 
   # Destruction order:
-  # 1. serverless_signal (workload 90s cooldown) must be destroyed first
-  # 2. Then this subnet can be deleted
-  # 3. decommissioning_buffer then waits before PSA connection is removed
-  depends_on = [terraform_data.serverless_signal, time_sleep.decommissioning_buffer]
+  # 1. This subnet is deleted (Cloud Run no longer reserves IPs here — egress
+  #    goes through the VPC Access Connector's own /28).
+  # 2. decommissioning_buffer then waits before the PSA connection is removed.
+  depends_on = [time_sleep.decommissioning_buffer]
 }
 
 resource "google_compute_subnetwork" "private_2" {
@@ -47,7 +54,7 @@ resource "google_compute_subnetwork" "private_2" {
     metadata             = "INCLUDE_ALL_METADATA"
   }
 
-  depends_on = [terraform_data.serverless_signal, time_sleep.decommissioning_buffer]
+  depends_on = [time_sleep.decommissioning_buffer]
 }
 
 # Reserved IP range for PSA (Private Service Access)

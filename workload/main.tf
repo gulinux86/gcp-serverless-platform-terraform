@@ -2,7 +2,14 @@
 # Data Sources and Inputs
 # ============================================
 
-# VPC configuration passed from foundation module via root orchestration
+# Foundation networking attributes, read from the foundation layer's remote
+# state (see remote_state.tf). Note the name reconciliation: foundation exports
+# psa_connection_id, which the workload consumes as vpc_peering_id.
+locals {
+  vpc_network_id   = data.terraform_remote_state.foundation.outputs.vpc_network_id
+  vpc_connector_id = data.terraform_remote_state.foundation.outputs.vpc_connector_id
+  vpc_peering_id   = data.terraform_remote_state.foundation.outputs.psa_connection_id
+}
 
 # ============================================
 # IAM and Service Accounts (Fine-grained PoLP)
@@ -63,8 +70,8 @@ module "database" {
   availability_type   = "REGIONAL"
   public_ip           = false
   deletion_protection = false
-  vpc_network_id      = var.vpc_network_id
-  vpc_peering_id      = var.vpc_peering_id
+  vpc_network_id      = local.vpc_network_id
+  vpc_peering_id      = local.vpc_peering_id
 }
 
 module "storage" {
@@ -144,19 +151,9 @@ resource "google_secret_manager_secret_iam_member" "backend_sa_db_password" {
 # Computing - Cloud Run Services
 # ============================================
 
-# Workload-level IP release guard: ensures all Direct VPC Egress IP reservations
-# are released before the workload module completes teardown.
-# Destroy order: Cloud Run modules destroyed → this timer waits 150s → workload done.
-# This fires regardless of whether per-service timers exist in state.
-resource "time_sleep" "vpc_egress_release_guard" {
-  destroy_duration = "150s"
-}
-
 # Backend API Service
 module "backend" {
   source = "../modules/workload/cloud_run_service"
-
-  depends_on = [time_sleep.vpc_egress_release_guard]
 
   name               = "backend"
   region             = var.region
@@ -166,7 +163,7 @@ module "backend" {
   min_instance_count = 1
 
   service_account_email = module.backend_sa.email
-  vpc_subnet_id         = var.private_subnet_id
+  vpc_connector_id      = local.vpc_connector_id
   gcs_bucket_name       = module.storage.bucket_name
 
   env_vars = {
@@ -186,8 +183,6 @@ module "backend" {
 module "frontend" {
   source = "../modules/workload/cloud_run_service"
 
-  depends_on = [time_sleep.vpc_egress_release_guard]
-
   name               = "frontend"
   region             = var.region
   image              = "gcr.io/cloudrun/hello"
@@ -195,7 +190,7 @@ module "frontend" {
   min_instance_count = 1
 
   service_account_email = module.frontend_sa.email
-  vpc_subnet_id         = var.private_subnet_id
+  vpc_connector_id      = local.vpc_connector_id
 
 }
 

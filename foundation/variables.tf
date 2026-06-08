@@ -19,10 +19,3 @@ variable "domain_name" {
   description = "Domain name for DNS (Optional)"
   default     = null
 }
-
-variable "serverless_decommission_signal" {
-  type        = map(string)
-  description = "Signal from the workload layer indicating serverless resources have completed their cooldown. Used to enforce destruction ordering: workload cooldown -> subnet deletion."
-  default     = null
-  nullable    = true
-}

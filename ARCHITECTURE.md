@@ -34,7 +34,7 @@ This document outlines a serverless-first GCP architecture for a two-tier web ap
                    │   Cloud Run (frontend) │       │   Cloud Run (backend)    │
                    │   ingress: LB only     │       │   ingress: LB only       │
                    │   SA: frontend-sa      │       │   SA: backend-sa         │
-                   │   Direct VPC Egress    │       │   Direct VPC Egress      │
+                   │   VPC Connector egress │       │   VPC Connector egress   │
                    │   GCS FUSE mount       │       │   Secret Manager refs    │
                    └───────────────────────┘       └────────────┬─────────────┘
                                                                 │
@@ -44,8 +44,8 @@ This document outlines a serverless-first GCP architecture for a two-tier web ap
                                           │                                         │
                                           │  ┌─────────────────────────────────┐   │
                                           │  │  Private Subnet (app-vpc-private)│   │
-                                          │  │  10.0.0.0/20                    │   │
-                                          │  │  Direct VPC Egress IPs live here│   │
+                                          │  │  10.0.2.0/24                    │   │
+                                          │  │  VPC Connector /28: 10.8.0.0/28 │   │
                                           │  └────────────────┬────────────────┘   │
                                           │                   │ PSA peering         │
                                           │  ┌────────────────▼────────────────┐   │
@@ -72,13 +72,18 @@ This document outlines a serverless-first GCP architecture for a two-tier web ap
 
 ## Infrastructure Layers
 
-The project uses a **strictly isolated two-layer architecture**. Each layer is a separate Terraform root module with its own state. The root `main.tf` orchestrates both by passing foundation outputs as workload inputs.
+The project uses a **strictly isolated two-layer architecture**. Each layer is an **independent Terraform root module with its own per-environment state** — there is no root orchestrator. The `workload` layer consumes the `foundation` layer's outputs by reading its **remote state**, which makes "foundation before workload" a hard dependency enforced by the CI pipelines.
 
 ```
-root main.tf
-├── module "foundation"  →  ./foundation/
-└── module "workload"    →  ./workload/          (depends_on: foundation)
+foundation/   (root)  ── apply ──▶  GCS state  gs://<bucket>/<env>/foundation/
+                                          │
+workload/     (root)  ── reads ──────────┘  (data.terraform_remote_state.foundation)
+                      ── apply ──▶  GCS state  gs://<bucket>/<env>/workload/
 ```
+
+State is separated per environment (`hml`, `prod`) and per layer via env-prefixed
+backend paths selected at init: `init -backend-config=environments/<env>/backend.hcl`.
+See [STATE_MIGRATION.md](docs/STATE_MIGRATION.md) for the layout and migration notes.
 
 ### Layer 1 — Foundation (Core Networking)
 
@@ -89,9 +94,10 @@ Owns the base networking environment. Nothing application-specific lives here. T
 | Resource | Module | Purpose |
 |----------|--------|---------|
 | VPC Network | `modules/foundation/vpc` | Custom VPC, no auto-subnets |
-| Private Subnet | `modules/foundation/vpc` | `10.0.0.0/20` — Cloud Run Direct VPC Egress |
-| Secondary Subnet | `modules/foundation/vpc` | Reserved for future use |
-| PSA IP Range | `modules/foundation/vpc` | `/16` at `172.21.0.0` — Cloud SQL private connectivity |
+| Private Subnet | `modules/foundation/vpc` | `10.0.2.0/24` — application subnet |
+| Secondary Subnet | `modules/foundation/vpc` | `10.0.3.0/24` — reserved for future use |
+| VPC Access Connector | `modules/foundation/vpc` | Dedicated `/28` (`10.8.0.0/28`) — Cloud Run egress into the VPC |
+| PSA IP Range | `modules/foundation/vpc` | `/16` — Cloud SQL private connectivity |
 | Service Networking Connection | `modules/foundation/vpc` | Peering for managed services (Cloud SQL) |
 | Firewall Rules | `modules/foundation/cloud_firewall` | Allow ports 443 + 8080 from RFC-1918 |
 | VPC Flow Logs | `modules/foundation/vpc` | Full metadata logging on private subnet |
@@ -101,7 +107,7 @@ Owns the base networking environment. Nothing application-specific lives here. T
 
 **Location:** `workload/`
 
-Owns everything application-specific. Consumes VPC outputs from foundation (`vpc_network_id`, `private_subnet_id`, `psa_connection_id`) as inputs.
+Owns everything application-specific. Reads the foundation layer's remote state for networking outputs (`vpc_network_id`, `vpc_connector_id`, `psa_connection_id`) — see `workload/remote_state.tf`.
 
 | Resource Group | Modules Used | Purpose |
 |----------------|-------------|---------|
@@ -203,36 +209,39 @@ Layer 6: Audit Logging
 
 ## Destroy Orchestration
 
-Tearing down this infrastructure is non-trivial due to GCP's asynchronous resource release behavior. Three timing guards are in place:
+Switching Cloud Run egress to the **Serverless VPC Access Connector** removed the
+hardest part of teardown. The connector is a managed resource with its own `/28`,
+so deleting Cloud Run no longer leaves IP reservations stranded in the application
+subnet — the previous per-service and workload-level `time_sleep` IP-release
+guards (and the foundation `serverless_decommission_signal` handshake) are gone.
+
+Two ordering concerns remain:
+
+1. **Layer order.** `workload` must be destroyed before `foundation` (the workload
+   reads foundation's state and uses the connector). The `terraform-destroy`
+   pipeline enforces this (`layer: both` ⇒ `workload foundation`).
+2. **PSA peering lock.** GCP holds a Private Service Access lock for several
+   minutes after subnet deletion. The one remaining guard handles this:
 
 ```
-terraform destroy
+workload destroy  →  Cloud Run, Cloud SQL, LB, etc. removed (connector freed cleanly)
+foundation destroy
         │
-        ▼
-  Cloud Run services destroyed
-        │   (Direct VPC Egress IPs are reserved internally by GCP)
-        ▼
-  time_sleep (150s per service + 150s workload guard)
-        │   (waits for GCP to release Direct VPC Egress IP reservations)
         ▼
   Private subnet deleted
         │
         ▼
-  time_sleep (600s = 10 min)
-        │   (GCP PSA lock release after subnet deletion)
+  time_sleep (600s = 10 min)   ← decommissioning_buffer (PSA lock release)
+        │
         ▼
   Service Networking Connection deleted (ABANDON policy)
         │
         ▼
-  PSA IP range deleted
-        │
-        ▼
-  VPC Network deleted
+  PSA IP range deleted  →  VPC Connector deleted  →  VPC Network deleted
 ```
 
-**Expected destroy duration: 15–25 minutes** due to the timing guards.
-
-**Important:** If Cloud Run services are deleted outside of the normal Terraform flow (e.g., via `gcloud run services delete`), the VPC Egress IP reservations may persist for 10–30 minutes and block subnet deletion. This is a GCP-internal behavior and cannot be bypassed programmatically.
+**Expected foundation destroy duration: ~10–12 minutes**, dominated by the PSA
+buffer. The workload layer now tears down without IP-release waits.
 
 ---
 
@@ -241,11 +250,11 @@ terraform destroy
 ```
 modules/
 ├── foundation/
-│   ├── vpc/                  VPC, subnets, PSA range + peering, flow logs, teardown timers
+│   ├── vpc/                  VPC, subnets, VPC Access Connector, PSA range + peering, flow logs, PSA buffer
 │   └── cloud_firewall/       Firewall rules
 │
 └── workload/
-    ├── cloud_run_service/    Cloud Run v2 service + Direct VPC Egress + GCS FUSE + secret refs
+    ├── cloud_run_service/    Cloud Run v2 service + VPC Connector egress + GCS FUSE + secret refs
     ├── cloud_sql/            Cloud SQL (PostgreSQL) private instance
     ├── cloud_storage/        GCS bucket
     ├── https_load_balancer/  Global LB + path routing + managed SSL + HTTP redirect
@@ -264,9 +273,12 @@ modules/
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Compute | Cloud Run v2 (not GKE) | No cluster management, scale-to-zero, lower operational overhead |
-| Networking | Direct VPC Egress (not VPC Connector) | Higher throughput, no connector bottleneck |
+| Networking | Serverless VPC Access Connector (not Direct VPC Egress) | Managed `/28`; no stranded subnet IP reservations on destroy — eliminates the IP-release cooldowns |
 | LB routing | Path-based at LB layer | Cloud Armor covers both services; frontend not in request path for API |
 | Database access | PSA (not Cloud SQL Auth Proxy) | Lower latency, no sidecar, private IP enforced at network level |
 | Secret injection | Secret Manager env var refs | Secrets never in plaintext; versioned + auditable |
-| State backend | GCS remote state | Shared state for team; versioning enabled |
+| State backend | GCS remote state, per layer + env | Independent layer states; `workload` reads `foundation` via `terraform_remote_state` |
+| Layering | Two independent roots (no root orchestrator) | Smaller blast radius; deploy `workload` without touching networking |
+| CI/CD | GitHub Actions (test, security-scan, plan, deploy, destroy) | Plan-on-PR, manual gated apply, confirmed destroy, per-layer selection |
+| CI auth | Workload Identity Federation (keyless) | No long-lived SA keys in GitHub; per-env pool + deployer SA (see `bootstrap/`) |
 | Ingress default | `INGRESS_TRAFFIC_INTERNAL_ONLY` | Secure by default; services must explicitly opt into LB exposure |

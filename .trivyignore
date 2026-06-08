@@ -1,0 +1,15 @@
+# Trivy ignore file — reviewed, documented exceptions only.
+#
+# Each entry MUST carry a reason and reference the relevant ARCHITECTURE.md
+# section. These are accepted *portfolio* trade-offs; TIGHTEN for prod.
+#
+# How to verify locally:
+#   trivy config --severity HIGH,CRITICAL .
+#
+# No exceptions are pre-populated: the GCP misconfiguration IDs (AVD-GCP-*) that
+# actually fire must be confirmed against the first CI scan, then added here one
+# per line with a justification. Until then the gate enforces all HIGH/CRITICAL.
+#
+# Example format (uncomment and justify a real ID after the first scan):
+# # Cloud SQL public IP is disabled, but <reason> ... (ARCHITECTURE.md §N)
+# AVD-GCP-0XXX

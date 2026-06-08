@@ -9,14 +9,6 @@ output "frontend_service_url" {
   value       = module.frontend.service_url
 }
 
-output "serverless_decommission_signal" {
-  description = "Combined signal for all serverless resources decommissioning"
-  value = {
-    backend  = module.backend.decommission_signal
-    frontend = module.frontend.decommission_signal
-  }
-}
-
 # Database Outputs
 output "database_connection_name" {
   description = "Cloud SQL connection name (for Cloud SQL Proxy)"
