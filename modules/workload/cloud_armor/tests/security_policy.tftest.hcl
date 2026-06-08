@@ -88,10 +88,13 @@ run "custom_rate_limit_threshold_applied" {
   }
 
   assert {
+    # try() guards the index: rules without rate_limit_options (XSS/SQLi/allow)
+    # yield null instead of erroring. Indexing inside the `if` condition is
+    # evaluated for every rule, so a blind [0] fails on rules with no rate limit.
     condition = length([
       for rule in google_compute_security_policy.this.rule
-      : rule if rule.action == "throttle" &&
-      rule.rate_limit_options[0].rate_limit_threshold[0].count == 50
+      : true
+      if try(rule.rate_limit_options[0].rate_limit_threshold[0].count, null) == 50
     ]) == 1
     error_message = "Custom rate_limit_threshold must be reflected in the throttle rule. Default (100) would leave the custom value silently ignored."
   }
