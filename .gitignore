@@ -22,6 +22,9 @@ errored.tfstate
 crash.log
 *.tfvars
 *.tfvars.json
+# Track the per-environment tfvars — they hold only non-secret config
+# (name, region, environment, state_bucket). Secrets go via TF_VAR_* in CI.
+!**/environments/*/terraform.tfvars
 override.tf
 override.tf.json
 _override.tf
