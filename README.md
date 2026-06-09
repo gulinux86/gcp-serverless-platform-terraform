@@ -106,41 +106,60 @@ Each layer is applied per environment by selecting a backend config:
 
 ### First-Time Setup
 
-**1. State bucket** (must exist before `init`; intentionally **not** managed by Terraform, so `destroy` never deletes it while the lock is held):
+**1. State bucket** (must exist before `init`; intentionally **not** managed by Terraform, so `destroy` never deletes it while the lock is held). One bucket per env, named without the project id — `serverless-hml` / `serverless-prod`:
 ```bash
-gcloud storage buckets create gs://<project-id>-terraform-state \
+gcloud storage buckets create gs://serverless-hml \
   --location=US-CENTRAL1 --uniform-bucket-level-access --project=<project-id>
-gcloud storage buckets update gs://<project-id>-terraform-state --versioning
+gcloud storage buckets update gs://serverless-hml --versioning
 ```
-Set this bucket name in each layer's `environments/<env>/backend.hcl` (and in the workload tfvars `state_bucket`).
+> GCS bucket names are **globally unique** across all of GCP. If `serverless-hml` is taken, pick a unique variant and change it in one place: the layer `environments/<env>/backend.hcl` (`bucket`) and `workload/environments/<env>/terraform.tfvars` (`state_bucket`). The name is non-secret, so it lives in those committed files.
 
-**2. Bootstrap keyless CI auth** (once per environment, with owner credentials):
+**2. Bootstrap keyless CI auth** (once per environment, with owner credentials; `project_id` is passed at runtime, not committed):
 ```bash
 terraform -chdir=bootstrap init
-terraform -chdir=bootstrap apply -var-file=environments/hml/terraform.tfvars
-# Copy the two outputs into GitHub secrets: HML_WIF_PROVIDER, HML_DEPLOYER_SA
+terraform -chdir=bootstrap apply \
+  -var-file=environments/hml/terraform.tfvars \
+  -var="project_id=<your-hml-project-id>"
+# Copy the two outputs into GitHub secrets: HML_WIF_PROVIDER, HML_WIF_SA
 ```
-Also set `HML_DB_PASSWORD` / `HML_API_SECRET_KEY` (and the `PROD_*` equivalents) as GitHub secrets, and add a required reviewer to the `prod` GitHub Environment. See [bootstrap/](bootstrap/).
+Bootstrap also grants the deployer SA `roles/storage.objectAdmin` on the state bucket. See [bootstrap/](bootstrap/).
 
-**3. Fill the per-env tfvars** — replace the `REPLACE-WITH-*` placeholders in `foundation/environments/<env>/terraform.tfvars` and `workload/environments/<env>/terraform.tfvars`. Sensitive values (`db_password`, `api_secret_key`) are **never** committed — they come from `TF_VAR_*` env vars / GitHub secrets.
+**3. GitHub secrets** (per env — nothing project-identifying is committed):
 
-**4. Deploy.** Normally via the `terraform-deploy` workflow (pick `environment` + `layer`). Locally, foundation first:
+| Secret | Purpose |
+|---|---|
+| `HML_PROJECT_ID` / `PROD_PROJECT_ID` | GCP project id → injected as `TF_VAR_project_id` (masked in logs) |
+| `HML_WIF_PROVIDER` / `PROD_WIF_PROVIDER` | Workload Identity provider resource name |
+| `HML_WIF_SA` / `PROD_WIF_SA` | Deployer service-account email |
+| `HML_DB_PASSWORD` / `PROD_DB_PASSWORD` | `TF_VAR_db_password` |
+| `HML_API_SECRET_KEY` / `PROD_API_SECRET_KEY` | `TF_VAR_api_secret_key` |
+
+Add a required reviewer to the `prod` GitHub Environment for gated prod applies.
+
+Committed tfvars hold only non-identifying values (`name`, `region`, `environment`, `state_bucket`).
+
+**4. Deploy.** Normally via the `terraform-deploy` workflow (pick `environment` + `layer`). Locally, foundation first (export only the secret values the CI gets from secrets):
 ```bash
 ENV=hml
+export TF_VAR_project_id=<your-hml-project-id>
+export TF_VAR_db_password=... TF_VAR_api_secret_key=...
+
 terraform -chdir=foundation init -backend-config=environments/$ENV/backend.hcl
 terraform -chdir=foundation apply -var-file=environments/$ENV/terraform.tfvars
 
-export TF_VAR_db_password=... TF_VAR_api_secret_key=...
 terraform -chdir=workload init -backend-config=environments/$ENV/backend.hcl
 terraform -chdir=workload apply -var-file=environments/$ENV/terraform.tfvars
 ```
 
 ### Destroy
 
-Switching to the VPC Access Connector removed the old multi-phase IP-release wait. Destroy is now a normal per-layer teardown in reverse order (**workload before foundation**), which the `terraform-destroy` workflow handles when you pick `layer: both`. Locally:
+Switching to the VPC Access Connector removed the old multi-phase IP-release wait. Destroy is now a normal per-layer teardown in reverse order (**workload before foundation**), which the `terraform-destroy` workflow handles when you pick `layer: both`. Locally (with the same `TF_VAR_*` exports as the deploy step):
 ```bash
 ENV=hml
+terraform -chdir=workload init -backend-config=environments/$ENV/backend.hcl
 terraform -chdir=workload destroy -var-file=environments/$ENV/terraform.tfvars
+
+terraform -chdir=foundation init -backend-config=environments/$ENV/backend.hcl
 terraform -chdir=foundation destroy -var-file=environments/$ENV/terraform.tfvars
 ```
 The foundation destroy still waits ~10 min on the PSA lock buffer (`decommissioning_buffer`) before removing the peering and VPC. The state bucket is preserved; delete it manually when no longer needed.

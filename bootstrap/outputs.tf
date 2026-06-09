@@ -1,7 +1,7 @@
 # Copy these two values into GitHub secrets for this environment:
 #   <ENV>_WIF_PROVIDER  <- workload_identity_provider
-#   <ENV>_DEPLOYER_SA   <- deployer_service_account
-# e.g. for hml: HML_WIF_PROVIDER, HML_DEPLOYER_SA
+#   <ENV>_WIF_SA        <- deployer_service_account
+# e.g. for hml: HML_WIF_PROVIDER, HML_WIF_SA
 
 output "workload_identity_provider" {
   description = "Full provider resource name for google-github-actions/auth (workload_identity_provider)."
