@@ -97,15 +97,19 @@ jobs:
         run: |
           if [ "$ENVIRONMENT" = "prod" ]; then
             echo "WIF_PROVIDER=${{ secrets.PROD_WIF_PROVIDER }}" >> "$GITHUB_ENV"
-            echo "DEPLOYER_SA=${{ secrets.PROD_DEPLOYER_SA }}" >> "$GITHUB_ENV"
+            echo "DEPLOYER_SA=${{ secrets.PROD_WIF_SA }}" >> "$GITHUB_ENV"
+            PID='${{ secrets.PROD_PROJECT_ID }}'
             echo "TF_VAR_db_password=${{ secrets.PROD_DB_PASSWORD }}" >> "$GITHUB_ENV"
             echo "TF_VAR_api_secret_key=${{ secrets.PROD_API_SECRET_KEY }}" >> "$GITHUB_ENV"
           else
             echo "WIF_PROVIDER=${{ secrets.HML_WIF_PROVIDER }}" >> "$GITHUB_ENV"
-            echo "DEPLOYER_SA=${{ secrets.HML_DEPLOYER_SA }}" >> "$GITHUB_ENV"
+            echo "DEPLOYER_SA=${{ secrets.HML_WIF_SA }}" >> "$GITHUB_ENV"
+            PID='${{ secrets.HML_PROJECT_ID }}'
             echo "TF_VAR_db_password=${{ secrets.HML_DB_PASSWORD }}" >> "$GITHUB_ENV"
             echo "TF_VAR_api_secret_key=${{ secrets.HML_API_SECRET_KEY }}" >> "$GITHUB_ENV"
           fi
+          # project_id via secret (masked). State bucket name is non-secret (backend.hcl).
+          echo "TF_VAR_project_id=$PID" >> "$GITHUB_ENV"
 
       - name: Authenticate to GCP (Workload Identity Federation)
         uses: google-github-actions/auth@v2 # TODO: pin to a commit SHA
