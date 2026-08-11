@@ -34,7 +34,7 @@ This document outlines a serverless-first GCP architecture for a two-tier web ap
                    │   Cloud Run (frontend) │       │   Cloud Run (backend)    │
                    │   ingress: LB only     │       │   ingress: LB only       │
                    │   SA: frontend-sa      │       │   SA: backend-sa         │
-                   │   VPC Connector egress │       │   VPC Connector egress   │
+                   │   Direct VPC Egress    │       │   Direct VPC Egress      │
                    │   GCS FUSE mount       │       │   Secret Manager refs    │
                    └───────────────────────┘       └────────────┬─────────────┘
                                                                 │
@@ -45,7 +45,7 @@ This document outlines a serverless-first GCP architecture for a two-tier web ap
                                           │  ┌─────────────────────────────────┐   │
                                           │  │  Private Subnet (app-vpc-private)│   │
                                           │  │  10.0.2.0/24                    │   │
-                                          │  │  VPC Connector /28: 10.8.0.0/28 │   │
+                                          │  │  Cloud Run network interfaces   │   │
                                           │  └────────────────┬────────────────┘   │
                                           │                   │ PSA peering         │
                                           │  ┌────────────────▼────────────────┐   │
@@ -96,9 +96,7 @@ Owns the base networking environment. Nothing application-specific lives here. T
 | VPC Network | `modules/foundation/vpc` | Custom VPC, no auto-subnets |
 | Private Subnet | `modules/foundation/vpc` | `10.0.2.0/24` — application subnet |
 | Secondary Subnet | `modules/foundation/vpc` | `10.0.3.0/24` — reserved for future use |
-| VPC Access Connector | `modules/foundation/vpc` | Cloud Run egress into the VPC, attached to the connector subnet below |
-| Connector Subnet | `modules/foundation/vpc` | Dedicated `/28` (`10.8.0.0/28`) with Private Google Access — declared explicitly rather than via the connector's `ip_cidr_range` shortcut (see §Connector connectivity) |
-| Connector Probe Rules | `modules/foundation/vpc` | Ingress on `tcp:667` from Google health-check and control-plane ranges, scoped to the `vpc-connector` tag |
+| Cloud Run egress path | `modules/foundation/vpc` | The private subnet doubles as the Direct VPC Egress attachment point for Cloud Run (see §Cloud Run egress) |
 | PSA IP Range | `modules/foundation/vpc` | `/16` — Cloud SQL private connectivity |
 | Service Networking Connection | `modules/foundation/vpc` | Peering for managed services (Cloud SQL) |
 | Firewall Rules | `modules/foundation/cloud_firewall` | Allow ports 443 + 8080 from RFC-1918 |
@@ -109,7 +107,7 @@ Owns the base networking environment. Nothing application-specific lives here. T
 
 **Location:** `workload/`
 
-Owns everything application-specific. Reads the foundation layer's remote state for networking outputs (`vpc_network_id`, `vpc_connector_id`, `psa_connection_id`) — see `workload/remote_state.tf`.
+Owns everything application-specific. Reads the foundation layer's remote state for networking outputs (`vpc_network_id`, `private_subnet_id`, `psa_connection_id`) — see `workload/remote_state.tf`.
 
 | Resource Group | Modules Used | Purpose |
 |----------------|-------------|---------|
@@ -209,23 +207,16 @@ Layer 6: Audit Logging
 
 ---
 
-## Connector connectivity
+## Cloud Run egress
 
-The Serverless VPC Access Connector accepts its range two ways, and the choice is
-not cosmetic:
+Cloud Run reaches the VPC through **Direct VPC Egress**: each service attaches a
+`network_interface` directly to the private subnet. There is no Serverless VPC
+Access Connector in the path.
 
-| | `ip_cidr_range = "10.8.0.0/28"` | explicit `subnet { name = … }` |
-|---|---|---|
-| Who owns the subnet | GCP, implicitly | this module |
-| Visible in `subnets list` | ❌ no | ✅ yes |
-| `private_ip_google_access` controllable | ❌ no | ✅ yes |
-| Firewall rules can target the range | ❌ awkward | ✅ yes |
+### Why not the connector
 
-This module uses the **explicit subnet**. With `ip_cidr_range`, GCP provisions a
-managed subnet that never appears in `gcloud compute networks subnets list`, so
-Private Google Access cannot be enabled on it. Connector instances carry no
-external IP and this VPC has no Cloud NAT, which leaves them with no route to
-Google APIs to report health. Creation then fails after ~5 minutes with:
+The connector was adopted, then abandoned after it could not be provisioned in
+this project. Creation consistently failed after ~4–5 minutes with:
 
 ```
 Error waiting for Creating Connector: Error code 13, message: An internal error
@@ -233,20 +224,49 @@ occurred: VPC Access connector failed to get healthy. Please check GCE quotas,
 logs and org policies and recreate.
 ```
 
-The message points at quotas and org policies, which is misleading — those are
-usually fine. Two conditions must hold, and both are provisioned here:
+The message points at quotas, logs and org policies. All three were ruled out
+with evidence:
 
-1. **Private Google Access** on the connector subnet, so instances can reach
-   Google APIs without an external IP or Cloud NAT.
-2. **Ingress on `tcp:667`** from Google's control-plane (`35.199.224.0/19`,
-   `107.178.230.64/26`) and health-check (`130.211.0.0/22`, `35.191.0.0/16`,
-   `108.170.220.0/23`) ranges. These rules are scoped to the `vpc-connector`
-   network tag that Serverless VPC Access applies to connector instances, so they
-   grant nothing to application workloads.
+| Suspect | Checked | Result |
+|---|---|---|
+| GCE quota | `CPUS 0/200`, `INSTANCES 0/24`, `IN_USE_ADDRESSES 0/8` | not the cause |
+| Org policies | `requireShieldedVm` unenforced; `vmExternalIpAccess`, `trustedImageProjects` = ALLOW | not the cause |
+| API / service agent | `vpcaccess.googleapis.com` enabled; agent holds `roles/vpcaccess.serviceAgent` | not the cause |
+| Egress route | default `0.0.0.0/0` → internet gateway present | not the cause |
 
-A failed connector is left behind in `ERROR` state and is **not** recorded in
+A second attempt addressed the two documented requirements the VPC did not yet
+satisfy — an **explicit connector subnet with Private Google Access** (the
+`ip_cidr_range` shortcut makes GCP provision a managed subnet where PGA cannot be
+set) and **ingress on `tcp:667`** from Google's control-plane and health-check
+ranges. It failed identically.
+
+At that point the connector had cost two failed deploys and was providing no
+capability that Direct VPC Egress does not. Direct VPC Egress is also Google's
+current recommendation for new workloads, removes an idle cost of roughly
+US$ 25–30/month per environment, and takes a managed component with its own
+health lifecycle out of the critical path.
+
+### What it costs
+
+Direct VPC Egress holds a **per-instance IP reservation** in the private subnet,
+and GCP releases those reservations asynchronously after the services are
+deleted. Deleting the subnet before that cleanup finishes fails with
+`resource in use`. Two cooldowns cover it:
+
+| Guard | Where | Duration |
+|---|---|---|
+| `time_sleep.wait_for_ip_release` | `modules/workload/cloud_run_service` | 150s per service |
+| `time_sleep.vpc_egress_release_guard` | `workload/main.tf` | 150s at layer level |
+
+The layer-level guard fires regardless of per-service timer state, and the
+destroy pipeline always tears down `workload` before `foundation`, so the
+subnet is only deleted after both have elapsed.
+
+### If the connector is revisited
+
+A leftover connector is left in `ERROR` state and is **not** recorded in
 Terraform state. Delete it before retrying, or the next apply fails with
-`alreadyExists` instead of the real error:
+`alreadyExists` instead of surfacing the real error:
 
 ```bash
 gcloud compute networks vpc-access connectors delete <name> --region <region>
@@ -256,22 +276,23 @@ gcloud compute networks vpc-access connectors delete <name> --region <region>
 
 ## Destroy Orchestration
 
-Switching Cloud Run egress to the **Serverless VPC Access Connector** removed the
-hardest part of teardown. The connector is a managed resource with its own `/28`,
-so deleting Cloud Run no longer leaves IP reservations stranded in the application
-subnet — the previous per-service and workload-level `time_sleep` IP-release
-guards (and the foundation `serverless_decommission_signal` handshake) are gone.
-
-Two ordering concerns remain:
+Teardown has two independent hazards, each with its own guard.
 
 1. **Layer order.** `workload` must be destroyed before `foundation` (the workload
-   reads foundation's state and uses the connector). The `terraform-destroy`
+   reads foundation's state and attaches to its subnet). The `terraform-destroy`
    pipeline enforces this (`layer: both` ⇒ `workload foundation`).
-2. **PSA peering lock.** GCP holds a Private Service Access lock for several
-   minutes after subnet deletion. The one remaining guard handles this:
+2. **Direct VPC Egress IP release.** GCP releases Cloud Run's per-instance subnet
+   IP reservations asynchronously. Two 150s cooldowns (per-service and
+   layer-level) hold the workload layer open until that completes — see
+   §Cloud Run egress.
+3. **PSA peering lock.** GCP holds a Private Service Access lock for several
+   minutes after subnet deletion. The 600s buffer handles this:
 
 ```
-workload destroy  →  Cloud Run, Cloud SQL, LB, etc. removed (connector freed cleanly)
+workload destroy  →  Cloud Run, Cloud SQL, LB, etc. removed
+        │
+        ▼
+  time_sleep (150s ×2)         ← IP-release cooldowns (Direct VPC Egress)
 foundation destroy
         │
         ▼
@@ -284,11 +305,11 @@ foundation destroy
   Service Networking Connection deleted (ABANDON policy)
         │
         ▼
-  PSA IP range deleted  →  VPC Connector deleted  →  VPC Network deleted
+  PSA IP range deleted  →  VPC Network deleted
 ```
 
 **Expected foundation destroy duration: ~10–12 minutes**, dominated by the PSA
-buffer. The workload layer now tears down without IP-release waits.
+buffer. The workload layer adds ~150s for the IP-release cooldowns.
 
 ---
 
@@ -297,11 +318,11 @@ buffer. The workload layer now tears down without IP-release waits.
 ```
 modules/
 ├── foundation/
-│   ├── vpc/                  VPC, subnets, VPC Access Connector, PSA range + peering, flow logs, PSA buffer
+│   ├── vpc/                  VPC, subnets, PSA range + peering, flow logs, PSA buffer
 │   └── cloud_firewall/       Firewall rules
 │
 └── workload/
-    ├── cloud_run_service/    Cloud Run v2 service + VPC Connector egress + GCS FUSE + secret refs
+    ├── cloud_run_service/    Cloud Run v2 service + Direct VPC Egress + GCS FUSE + secret refs
     ├── cloud_sql/            Cloud SQL (PostgreSQL) private instance
     ├── cloud_storage/        GCS bucket
     ├── https_load_balancer/  Global LB + path routing + managed SSL + HTTP redirect
@@ -320,7 +341,7 @@ modules/
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Compute | Cloud Run v2 (not GKE) | No cluster management, scale-to-zero, lower operational overhead |
-| Networking | Serverless VPC Access Connector (not Direct VPC Egress) | Managed `/28`; no stranded subnet IP reservations on destroy — eliminates the IP-release cooldowns |
+| Networking | Direct VPC Egress (not a Serverless VPC Access Connector) | No connector fleet to keep healthy and no idle cost; the price is per-instance IP reservations, handled by the release cooldowns |
 | LB routing | Path-based at LB layer | Cloud Armor covers both services; frontend not in request path for API |
 | Database access | PSA (not Cloud SQL Auth Proxy) | Lower latency, no sidecar, private IP enforced at network level |
 | Secret injection | Secret Manager env var refs | Secrets never in plaintext; versioned + auditable |

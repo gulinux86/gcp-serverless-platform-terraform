@@ -4,6 +4,10 @@ resource "google_cloud_run_v2_service" "this" {
   deletion_protection = false
   ingress             = var.ingress
 
+  # Ensures the IP-release cooldown is destroyed AFTER Cloud Run.
+  # Create order: timer → Cloud Run | Destroy order: Cloud Run → timer waits 150s
+  depends_on = [time_sleep.wait_for_ip_release]
+
   template {
     service_account = var.service_account_email
 
@@ -11,14 +15,18 @@ resource "google_cloud_run_v2_service" "this" {
       min_instance_count = var.min_instance_count
     }
 
-    # Egress to the VPC via the Serverless VPC Access Connector. Unlike Direct VPC
-    # Egress, the connector holds no per-service IP reservations in the app
-    # subnets, so no IP-release cooldown is needed on destroy.
+    # Direct VPC Egress: the service attaches a network interface straight to the
+    # private subnet. No Serverless VPC Access Connector sits in the path — one
+    # less managed component, no connector cost, and no connector health
+    # dependency. The trade-off is per-instance IP reservations in the subnet,
+    # which GCP releases asynchronously; see time_sleep.wait_for_ip_release below.
     dynamic "vpc_access" {
-      for_each = var.vpc_connector_id != null ? [1] : []
+      for_each = var.vpc_subnet_id != null ? [1] : []
       content {
-        connector = var.vpc_connector_id
-        egress    = "ALL_TRAFFIC"
+        network_interfaces {
+          subnetwork = var.vpc_subnet_id
+        }
+        egress = "ALL_TRAFFIC"
       }
     }
 
@@ -83,4 +91,13 @@ resource "google_cloud_run_v2_service_iam_member" "noauth" {
   name     = google_cloud_run_v2_service.this.name
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+# Cooldown so GCP can release Direct VPC Egress IP reservations after the service
+# is deleted. Destroy order: Cloud Run deleted → this timer waits 150s → module
+# finishes. The foundation subnet can only be deleted once the whole workload
+# layer (including this timer) is gone, which the destroy pipeline guarantees by
+# tearing down workload before foundation.
+resource "time_sleep" "wait_for_ip_release" {
+  destroy_duration = "150s"
 }

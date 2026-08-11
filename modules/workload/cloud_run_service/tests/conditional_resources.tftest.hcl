@@ -81,29 +81,38 @@ run "scale_to_zero_by_default" {
   }
 }
 
-run "connector_egress_configured_when_set" {
+run "direct_vpc_egress_configured_when_subnet_set" {
   command = plan
 
   variables {
-    vpc_connector_id = "projects/test/locations/us-central1/connectors/app-vpc-connector"
+    vpc_subnet_id = "projects/test/regions/us-central1/subnetworks/app-vpc-private"
   }
 
   assert {
-    condition     = google_cloud_run_v2_service.this.template[0].vpc_access[0].connector == "projects/test/locations/us-central1/connectors/app-vpc-connector"
-    error_message = "Cloud Run must egress through the VPC Access Connector when one is provided."
+    condition     = google_cloud_run_v2_service.this.template[0].vpc_access[0].network_interfaces[0].subnetwork == "projects/test/regions/us-central1/subnetworks/app-vpc-private"
+    error_message = "Cloud Run must attach a Direct VPC Egress network interface to the private subnet when one is provided."
   }
 
   assert {
     condition     = google_cloud_run_v2_service.this.template[0].vpc_access[0].egress == "ALL_TRAFFIC"
-    error_message = "Connector egress must route ALL_TRAFFIC through the VPC. Split egress would send private IPs (e.g. Cloud SQL) through the public internet."
+    error_message = "VPC egress must route ALL_TRAFFIC through the VPC. Split egress would send private IPs (e.g. Cloud SQL) through the public internet."
   }
 }
 
-run "no_vpc_access_without_connector" {
+run "no_vpc_access_without_subnet" {
   command = plan
 
   assert {
     condition     = length(google_cloud_run_v2_service.this.template[0].vpc_access) == 0
-    error_message = "No vpc_access block must be rendered when vpc_connector_id is null — an empty connector reference is invalid at apply time."
+    error_message = "No vpc_access block must be rendered when vpc_subnet_id is null — an empty network interface is invalid at apply time."
+  }
+}
+
+run "ip_release_cooldown_always_present" {
+  command = plan
+
+  assert {
+    condition     = time_sleep.wait_for_ip_release.destroy_duration == "150s"
+    error_message = "Direct VPC Egress holds per-instance IP reservations that GCP releases asynchronously. Removing this cooldown makes the foundation subnet deletion race against that cleanup and fail intermittently with 'resource in use'."
   }
 }

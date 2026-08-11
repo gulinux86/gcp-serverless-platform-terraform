@@ -38,12 +38,3 @@ output "secondary_subnet_id" {
   value       = google_compute_subnetwork.private_2.id
 }
 
-output "vpc_connector_id" {
-  description = "Serverless VPC Access Connector ID (used by Cloud Run vpc_access.connector)"
-  value       = google_vpc_access_connector.this.id
-}
-
-output "vpc_connector_name" {
-  description = "Serverless VPC Access Connector name"
-  value       = google_vpc_access_connector.this.name
-}

@@ -38,8 +38,8 @@ variable "service_account_email" {
   default     = null
 }
 
-variable "vpc_connector_id" {
-  description = "Serverless VPC Access Connector ID for Cloud Run egress into the VPC. When null, no vpc_access block is rendered."
+variable "vpc_subnet_id" {
+  description = "Private subnet ID for Direct VPC Egress. The service attaches a network interface to this subnet. When null, no vpc_access block is rendered."
   type        = string
   default     = null
 }
