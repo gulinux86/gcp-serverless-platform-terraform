@@ -39,7 +39,3 @@ output "secondary_subnet_id" {
   value       = module.vpc.secondary_subnet_id
 }
 
-output "vpc_connector_id" {
-  description = "Serverless VPC Access Connector ID (consumed by the workload layer's Cloud Run services)"
-  value       = module.vpc.vpc_connector_id
-}

@@ -1,6 +1,6 @@
 # GCP Serverless Platform — Terraform
 
-Production-grade serverless infrastructure on Google Cloud Platform. Two-tier web application (frontend + backend API + managed PostgreSQL) provisioned with Terraform, using Cloud Run v2 with a Serverless VPC Access Connector, path-based Global Load Balancing, and Cloud Armor WAF. Two independent Terraform layers, per-environment state (`hml`/`prod`), and a full GitHub Actions delivery pipeline with keyless (WIF) auth.
+Production-grade serverless infrastructure on Google Cloud Platform. Two-tier web application (frontend + backend API + managed PostgreSQL) provisioned with Terraform, using Cloud Run v2 with Direct VPC Egress, path-based Global Load Balancing, and Cloud Armor WAF. Two independent Terraform layers, per-environment state (`hml`/`prod`), and a full GitHub Actions delivery pipeline with keyless (WIF) auth.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system diagram and component reference.
 
@@ -50,10 +50,10 @@ gcloud config set project <project-id>
 │
 └── modules/
     ├── foundation/
-    │   ├── vpc/                # VPC, subnets, VPC Connector, PSA range + peering, flow logs
+    │   ├── vpc/                # VPC, subnets, PSA range + peering, flow logs
     │   └── cloud_firewall/     # Firewall rules
     └── workload/
-        ├── cloud_run_service/  # Cloud Run v2 service + VPC Connector egress
+        ├── cloud_run_service/  # Cloud Run v2 service + Direct VPC Egress
         ├── cloud_sql/          # PostgreSQL private instance
         ├── cloud_storage/      # GCS bucket
         ├── https_load_balancer/# Global LB + path routing + Cloud Armor attachment
@@ -80,7 +80,7 @@ workload/    ── reads ───────────┘   data.terraform_
              ── apply ──▶  GCS state (gs://<bucket>/<env>/workload/)
 ```
 
-**Foundation** owns the network (VPC, subnets, VPC Access Connector, PSA, firewall). It must be applied before workload and destroyed after it.
+**Foundation** owns the network (VPC, subnets, PSA, firewall). It must be applied before workload and destroyed after it.
 
 **Workload** owns compute and data. It reads foundation's outputs (`vpc_network_id`, `vpc_connector_id`, `psa_connection_id`) from remote state via `workload/remote_state.tf` — so it cannot plan until foundation is applied. The `terraform-deploy`/`terraform-destroy` pipelines enforce the apply/destroy ordering; `terraform-plan` skips the workload plan with a clear message when foundation has no outputs yet.
 
@@ -92,7 +92,7 @@ Each layer is applied per environment by selecting a backend config:
 | Decision | Choice | Rationale |
 |---|---|---|
 | Compute | Cloud Run v2 (not GKE) | No cluster management, scale-to-zero, per-request billing |
-| VPC connectivity | Serverless VPC Access Connector (not Direct VPC Egress) | No stranded subnet IP reservations on destroy — removes the IP-release cooldowns |
+| VPC connectivity | Direct VPC Egress (not a Serverless VPC Access Connector) | No connector fleet to keep healthy, no idle cost; per-instance IP reservations handled by release cooldowns (ARCHITECTURE.md §Cloud Run egress) |
 | LB routing | Path-based at LB layer (`/api/*` → backend, `/*` → frontend) | Cloud Armor covers both services; frontend not in API request path |
 | Database access | PSA private IP (not Cloud SQL Auth Proxy) | Lower latency, no sidecar, network-level enforcement |
 | Secret injection | Secret Manager env var refs | Secrets never in plaintext; versioned and auditable |
@@ -153,7 +153,7 @@ terraform -chdir=workload apply -var-file=environments/$ENV/terraform.tfvars
 
 ### Destroy
 
-Switching to the VPC Access Connector removed the old multi-phase IP-release wait. Destroy is now a normal per-layer teardown in reverse order (**workload before foundation**), which the `terraform-destroy` workflow handles when you pick `layer: both`. Locally (with the same `TF_VAR_*` exports as the deploy step):
+Destroy runs per layer in reverse order (**workload before foundation**), which the `terraform-destroy` workflow handles when you pick `layer: both`. The workload layer holds itself open for ~150s so GCP can release Direct VPC Egress IP reservations before the foundation subnet is deleted. Locally (with the same `TF_VAR_*` exports as the deploy step):
 ```bash
 ENV=hml
 terraform -chdir=workload init -backend-config=environments/$ENV/backend.hcl
@@ -231,10 +231,10 @@ to read.
 → `layer: foundation`), then re-run. The `terraform-plan` workflow already detects
 this and skips the workload plan with an explanatory message instead of erroring.
 
-> **Note:** The previous "subnetwork is already being used by `serverless-ipv4-*`"
-> failure no longer occurs. It was caused by Direct VPC Egress holding IP
-> reservations in the subnet; the Serverless VPC Access Connector (its own `/28`,
-> managed resource) removed that class of teardown failure.
+> **Note:** A `subnetwork is already being used by serverless-ipv4-*` failure on
+> foundation destroy means the Direct VPC Egress IP reservations had not been
+> released yet. The 150s cooldowns in the workload layer normally cover this;
+> if it appears, wait a few minutes and re-run the foundation destroy.
 
 ---
 

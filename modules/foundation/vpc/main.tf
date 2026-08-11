@@ -4,105 +4,16 @@ resource "google_compute_network" "this" {
   routing_mode            = var.routing_mode
 }
 
-# Dedicated /28 subnet for the Serverless VPC Access Connector.
+# Cloud Run reaches this VPC through Direct VPC Egress: each service attaches a
+# network_interface directly to the private subnet below. There is no Serverless
+# VPC Access Connector.
 #
-# Why an explicit subnet instead of the connector's `ip_cidr_range` shortcut:
-# with ip_cidr_range, GCP provisions a managed subnet that never appears in
-# `gcloud compute networks subnets list` — which means private_ip_google_access
-# cannot be set on it. Connector instances have no external IP and this VPC has
-# no Cloud NAT, so without Private Google Access they cannot reach Google APIs
-# to report health, and creation fails with "connector failed to get healthy".
-# Owning the subnet also lets firewall rules target the range explicitly.
-resource "google_compute_subnetwork" "connector" {
-  name                     = "${var.name}-connector"
-  ip_cidr_range            = var.connector_cidr
-  region                   = var.region
-  network                  = google_compute_network.this.id
-  purpose                  = "PRIVATE"
-  private_ip_google_access = true
-
-  # No flow logs here: this /28 carries only connector-internal traffic, and the
-  # application-visible flows are already captured on the private subnets.
-}
-
-# Serverless VPC Access Connector — the egress path Cloud Run uses to reach the
-# VPC. Replaces Direct VPC Egress: the connector is a managed resource with its
-# own dedicated /28, so no per-service IP reservations linger in the application
-# subnets on destroy. This removes the need for the workload IP-release cooldowns
-# (time_sleep guards) and the serverless_decommission_signal handshake.
-#
-# `subnet` and `ip_cidr_range`/`network` are mutually exclusive — attaching to
-# the subnet above is what gives the connector Private Google Access.
-resource "google_vpc_access_connector" "this" {
-  name          = "${var.name}-connector"
-  region        = var.region
-  min_instances = var.connector_min_instances
-  max_instances = var.connector_max_instances
-  machine_type  = var.connector_machine_type
-
-  subnet {
-    name = google_compute_subnetwork.connector.name
-  }
-}
-
-# Connector instances are tagged `vpc-connector` (and
-# `vpc-connector-<region>-<name>`) by Serverless VPC Access. The two rules below
-# open the probe paths the connector needs to report healthy. Both are scoped to
-# Google-owned source ranges AND to the connector tag, so they grant nothing to
-# application workloads.
-
-# Control-plane requests from Google infrastructure to the connector.
-resource "google_compute_firewall" "connector_requests" {
-  name        = "${var.name}-connector-requests"
-  network     = google_compute_network.this.name
-  direction   = "INGRESS"
-  priority    = 1000
-  target_tags = ["vpc-connector"]
-
-  source_ranges = [
-    "35.199.224.0/19",   # Serverless VPC Access control plane
-    "107.178.230.64/26", # Google infrastructure
-  ]
-
-  allow {
-    protocol = "tcp"
-    ports    = ["667"]
-  }
-
-  allow {
-    protocol = "udp"
-    ports    = ["665-666"]
-  }
-
-  allow {
-    protocol = "icmp"
-  }
-
-  description = "Serverless VPC Access control-plane requests to connector instances"
-}
-
-# Health checks. Without these the instances start but never pass the health
-# check, and the create call fails after ~5 minutes with a generic internal error.
-resource "google_compute_firewall" "connector_health_checks" {
-  name        = "${var.name}-connector-health-checks"
-  network     = google_compute_network.this.name
-  direction   = "INGRESS"
-  priority    = 1000
-  target_tags = ["vpc-connector"]
-
-  source_ranges = [
-    "130.211.0.0/22",
-    "35.191.0.0/16",
-    "108.170.220.0/23",
-  ]
-
-  allow {
-    protocol = "tcp"
-    ports    = ["667"]
-  }
-
-  description = "Google health-check probes to VPC Access Connector instances"
-}
+# The connector was tried and abandoned — see ARCHITECTURE.md §"Cloud Run egress".
+# The cost of Direct VPC Egress is that Cloud Run holds per-instance IP
+# reservations in the subnet, and GCP releases them asynchronously after the
+# services are deleted. That is handled by the IP-release cooldowns in the
+# workload layer (modules/workload/cloud_run_service + workload/main.tf) plus the
+# pipeline's layer ordering: workload is always destroyed before foundation.
 
 resource "google_compute_subnetwork" "private" {
   name                     = "${var.name}-private"
