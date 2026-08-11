@@ -96,7 +96,9 @@ Owns the base networking environment. Nothing application-specific lives here. T
 | VPC Network | `modules/foundation/vpc` | Custom VPC, no auto-subnets |
 | Private Subnet | `modules/foundation/vpc` | `10.0.2.0/24` — application subnet |
 | Secondary Subnet | `modules/foundation/vpc` | `10.0.3.0/24` — reserved for future use |
-| VPC Access Connector | `modules/foundation/vpc` | Dedicated `/28` (`10.8.0.0/28`) — Cloud Run egress into the VPC |
+| VPC Access Connector | `modules/foundation/vpc` | Cloud Run egress into the VPC, attached to the connector subnet below |
+| Connector Subnet | `modules/foundation/vpc` | Dedicated `/28` (`10.8.0.0/28`) with Private Google Access — declared explicitly rather than via the connector's `ip_cidr_range` shortcut (see §Connector connectivity) |
+| Connector Probe Rules | `modules/foundation/vpc` | Ingress on `tcp:667` from Google health-check and control-plane ranges, scoped to the `vpc-connector` tag |
 | PSA IP Range | `modules/foundation/vpc` | `/16` — Cloud SQL private connectivity |
 | Service Networking Connection | `modules/foundation/vpc` | Peering for managed services (Cloud SQL) |
 | Firewall Rules | `modules/foundation/cloud_firewall` | Allow ports 443 + 8080 from RFC-1918 |
@@ -204,6 +206,51 @@ Layer 6: Audit Logging
 | `backend-sa` | `roles/secretmanager.secretAccessor` | Per-secret (app-api-key, db-password) |
 | `frontend-sa` | `roles/storage.objectViewer` | Project |
 | `rotation-invoker` | `roles/run.invoker` | Secret rotation Cloud Run Job only |
+
+---
+
+## Connector connectivity
+
+The Serverless VPC Access Connector accepts its range two ways, and the choice is
+not cosmetic:
+
+| | `ip_cidr_range = "10.8.0.0/28"` | explicit `subnet { name = … }` |
+|---|---|---|
+| Who owns the subnet | GCP, implicitly | this module |
+| Visible in `subnets list` | ❌ no | ✅ yes |
+| `private_ip_google_access` controllable | ❌ no | ✅ yes |
+| Firewall rules can target the range | ❌ awkward | ✅ yes |
+
+This module uses the **explicit subnet**. With `ip_cidr_range`, GCP provisions a
+managed subnet that never appears in `gcloud compute networks subnets list`, so
+Private Google Access cannot be enabled on it. Connector instances carry no
+external IP and this VPC has no Cloud NAT, which leaves them with no route to
+Google APIs to report health. Creation then fails after ~5 minutes with:
+
+```
+Error waiting for Creating Connector: Error code 13, message: An internal error
+occurred: VPC Access connector failed to get healthy. Please check GCE quotas,
+logs and org policies and recreate.
+```
+
+The message points at quotas and org policies, which is misleading — those are
+usually fine. Two conditions must hold, and both are provisioned here:
+
+1. **Private Google Access** on the connector subnet, so instances can reach
+   Google APIs without an external IP or Cloud NAT.
+2. **Ingress on `tcp:667`** from Google's control-plane (`35.199.224.0/19`,
+   `107.178.230.64/26`) and health-check (`130.211.0.0/22`, `35.191.0.0/16`,
+   `108.170.220.0/23`) ranges. These rules are scoped to the `vpc-connector`
+   network tag that Serverless VPC Access applies to connector instances, so they
+   grant nothing to application workloads.
+
+A failed connector is left behind in `ERROR` state and is **not** recorded in
+Terraform state. Delete it before retrying, or the next apply fails with
+`alreadyExists` instead of the real error:
+
+```bash
+gcloud compute networks vpc-access connectors delete <name> --region <region>
+```
 
 ---
 

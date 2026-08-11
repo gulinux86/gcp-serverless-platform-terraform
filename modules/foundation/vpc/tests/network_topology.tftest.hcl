@@ -77,12 +77,53 @@ run "connector_uses_dedicated_range" {
   command = plan
 
   assert {
-    condition     = google_vpc_access_connector.this.ip_cidr_range == "10.8.0.0/28"
+    condition     = google_compute_subnetwork.connector.ip_cidr_range == "10.8.0.0/28"
     error_message = "The VPC Access Connector must use its own dedicated /28, separate from the application subnets. Sharing a range with the private subnets reintroduces the IP-contention this connector exists to avoid."
   }
 
   assert {
-    condition     = google_vpc_access_connector.this.network == google_compute_network.this.name
-    error_message = "The connector must attach to this module's VPC network so Cloud Run egress stays inside the private network."
+    condition = (
+      google_compute_subnetwork.connector.ip_cidr_range != google_compute_subnetwork.private.ip_cidr_range &&
+      google_compute_subnetwork.connector.ip_cidr_range != google_compute_subnetwork.private_2.ip_cidr_range
+    )
+    error_message = "The connector range must be distinct from both application subnets. Sharing a range reintroduces the IP contention the connector exists to avoid."
+  }
+
+  assert {
+    condition     = one(google_vpc_access_connector.this.subnet).name == google_compute_subnetwork.connector.name
+    error_message = "The connector must attach to the explicit connector subnet. Falling back to ip_cidr_range makes GCP provision an unmanaged subnet where Private Google Access cannot be enabled."
+  }
+}
+
+run "connector_subnet_has_google_access" {
+  command = plan
+
+  assert {
+    condition     = google_compute_subnetwork.connector.private_ip_google_access == true
+    error_message = "The connector subnet MUST have Private Google Access. Connector instances have no external IP and this VPC has no Cloud NAT, so without PGA they cannot reach Google APIs to report health and creation fails with 'connector failed to get healthy'."
+  }
+}
+
+run "connector_probe_paths_are_open" {
+  command = plan
+
+  assert {
+    condition     = contains(google_compute_firewall.connector_health_checks.source_ranges, "130.211.0.0/22") && contains(google_compute_firewall.connector_health_checks.source_ranges, "35.191.0.0/16")
+    error_message = "Google health-check ranges must be allowed to reach the connector. Without them the instances never pass the health check and creation fails after ~5 minutes."
+  }
+
+  assert {
+    condition     = contains(google_compute_firewall.connector_requests.source_ranges, "35.199.224.0/19")
+    error_message = "The Serverless VPC Access control-plane range (35.199.224.0/19) must be allowed to reach connector instances."
+  }
+
+  assert {
+    condition = (
+      contains(google_compute_firewall.connector_health_checks.target_tags, "vpc-connector") &&
+      length(google_compute_firewall.connector_health_checks.target_tags) == 1 &&
+      contains(google_compute_firewall.connector_requests.target_tags, "vpc-connector") &&
+      length(google_compute_firewall.connector_requests.target_tags) == 1
+    )
+    error_message = "Connector probe rules MUST be scoped to exactly the vpc-connector tag. An untagged rule would open port 667 to every instance in the VPC."
   }
 }
