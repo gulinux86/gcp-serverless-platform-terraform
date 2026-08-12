@@ -232,9 +232,11 @@ to read.
 this and skips the workload plan with an explanatory message instead of erroring.
 
 > **Note:** A `subnetwork is already being used by serverless-ipv4-*` failure on
-> foundation destroy means the Direct VPC Egress IP reservations had not been
-> released yet. The 150s cooldowns in the workload layer normally cover this;
-> if it appears, wait a few minutes and re-run the foundation destroy.
+> foundation destroy means GCP has not yet released the `purpose=SERVERLESS`
+> address reservation that Direct VPC Egress pins in the subnet. It cannot be
+> deleted manually and has no published release SLA. The `terraform-destroy`
+> workflow waits it out automatically; if you hit this destroying locally, see
+> [docs/runbooks/serverless-ipv4-reservation.md](docs/runbooks/serverless-ipv4-reservation.md).
 
 ---
 
