@@ -248,19 +248,33 @@ health lifecycle out of the critical path.
 
 ### What it costs
 
-Direct VPC Egress holds a **per-instance IP reservation** in the private subnet,
-and GCP releases those reservations asynchronously after the services are
-deleted. Deleting the subnet before that cleanup finishes fails with
-`resource in use`. Two cooldowns cover it:
+Attaching Cloud Run to the subnet creates **one address with
+`purpose: SERVERLESS`** in it — one per subnet attachment, not one per instance.
+That address is held by an `addressReservation` owned by
+`serverless.googleapis.com`:
 
-| Guard | Where | Duration |
-|---|---|---|
-| `time_sleep.wait_for_ip_release` | `modules/workload/cloud_run_service` | 150s per service |
-| `time_sleep.vpc_egress_release_guard` | `workload/main.tf` | 150s at layer level |
+```
+subnet  ◄──  address (purpose: SERVERLESS)  ◄──  addressReservation
+                                                 (serverless.googleapis.com)
+```
 
-The layer-level guard fires regardless of per-service timer state, and the
-destroy pipeline always tears down `workload` before `foundation`, so the
-subnet is only deleted after both have elapsed.
+After the services are deleted the reservation is released **asynchronously,
+with no documented upper bound**, and until then the subnet cannot be deleted.
+The reservation has no user, has no public API, and cannot be deleted by hand —
+`gcloud compute addresses delete` is rejected while it exists.
+
+One mechanism handles this: the **serverless IP-release gate** in
+`.github/workflows/terraform-destroy.yml`. Before destroying the foundation it
+polls every 60s (120 min timeout) until no `purpose=SERVERLESS` address remains
+in the region.
+
+Earlier revisions also carried two `time_sleep` cooldowns (150s per service and
+150s at layer level). They were removed: a measured teardown showed the
+reservation held for **over an hour** after the last service was deleted, so
+300s of sleeping changed nothing while claiming in code that the problem was
+handled. One mechanism that verifies beats two that guess.
+
+Runbook: [serverless-ipv4-reservation.md](runbooks/serverless-ipv4-reservation.md)
 
 ### If the connector is revisited
 
@@ -281,10 +295,9 @@ Teardown has two independent hazards, each with its own guard.
 1. **Layer order.** `workload` must be destroyed before `foundation` (the workload
    reads foundation's state and attaches to its subnet). The `terraform-destroy`
    pipeline enforces this (`layer: both` ⇒ `workload foundation`).
-2. **Direct VPC Egress IP release.** GCP releases Cloud Run's per-instance subnet
-   IP reservations asynchronously. Two 150s cooldowns (per-service and
-   layer-level) hold the workload layer open until that completes — see
-   §Cloud Run egress.
+2. **Direct VPC Egress IP release.** GCP releases the `purpose=SERVERLESS`
+   address reservation asynchronously. The destroy pipeline gates the foundation
+   layer on it actually being gone — see §Cloud Run egress.
 3. **PSA peering lock.** GCP holds a Private Service Access lock for several
    minutes after subnet deletion. The 600s buffer handles this:
 
@@ -292,7 +305,7 @@ Teardown has two independent hazards, each with its own guard.
 workload destroy  →  Cloud Run, Cloud SQL, LB, etc. removed
         │
         ▼
-  time_sleep (150s ×2)         ← IP-release cooldowns (Direct VPC Egress)
+  GATE: poll until no purpose=SERVERLESS address remains  (pipeline, 120 min max)
 foundation destroy
         │
         ▼
@@ -309,7 +322,8 @@ foundation destroy
 ```
 
 **Expected foundation destroy duration: ~10–12 minutes**, dominated by the PSA
-buffer. The workload layer adds ~150s for the IP-release cooldowns.
+buffer — plus however long GCP takes to release the serverless address
+reservation, which the gate waits out and which is not bounded by any SLA.
 
 ---
 

@@ -73,6 +73,10 @@ jobs:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.DEPLOYER_SA }}
 
+      # Needed by the serverless IP-release gate in the Destroy step.
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2 # TODO: pin to a commit SHA
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
@@ -91,7 +95,73 @@ jobs:
       - name: Destroy
         run: |
           set -euo pipefail
+
+          REGION=$(sed -nE 's/^[[:space:]]*region[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
+            "foundation/environments/${ENVIRONMENT}/terraform.tfvars")
+          REGION="${REGION:-us-central1}"
+
+          # Serverless IP-release gate.
+          #
+          # Cloud Run's Direct VPC Egress leaves behind a compute address with
+          # purpose=SERVERLESS, held by serverless.googleapis.com through an
+          # addressReservation. That reservation has no user, has no public API,
+          # and CANNOT be deleted — `gcloud compute addresses delete` is rejected
+          # while it exists. It blocks deletion of the private subnet, failing the
+          # foundation destroy with:
+          #
+          #   The subnetwork resource '...' is already being used by
+          #   'projects/.../addresses/serverless-ipv4-...'
+          #
+          # Google releases it asynchronously with no documented upper bound, so
+          # the only correct behaviour is to wait and report progress rather than
+          # guess with a fixed sleep.
+          #
+          # Timeout sizing, from one measured teardown (2026-08-11):
+          #   reservation created 19:42Z, released 21:49Z — 2h07 total, and at
+          #   least 1h20 after the last Cloud Run service was deleted.
+          # A 30- and then a 60-minute timeout were both tried and both would have
+          # failed a perfectly healthy teardown. 120 minutes leaves margin over the
+          # only sample available; there is no published SLA to size against.
+          #
+          # Nothing is billed while waiting — the leftover foundation resources
+          # (VPC, subnet, PSA range, peering) are free, so a long wait or a re-run
+          # tomorrow costs nothing.
+          # Runbook: docs/runbooks/serverless-ipv4-reservation.md
+          wait_for_serverless_release() {
+            local deadline=$(( SECONDS + 7200 )) # 120 min
+            local left
+            while :; do
+              left=$(gcloud compute addresses list \
+                --regions="$REGION" --filter="purpose=SERVERLESS" \
+                --format="value(name)" | wc -l)
+
+              if [ "$left" -eq 0 ]; then
+                echo "No serverless IP reservations left in ${REGION}."
+                return 0
+              fi
+
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "::error::${left} serverless IP reservation(s) still held in ${REGION} after 120 minutes."
+                gcloud compute addresses list --regions="$REGION" --filter="purpose=SERVERLESS"
+                echo "These are released by Google and cannot be deleted manually."
+                echo "Re-run this workflow with layer: foundation once they are gone."
+                return 1
+              fi
+
+              echo "Waiting for ${left} serverless IP reservation(s) in ${REGION} — $(( SECONDS / 60 ))m elapsed."
+              sleep 60
+            done
+          }
+
           for L in $LAYERS; do
+            # Gate only guards the foundation: it owns the subnet the reservation
+            # pins. Destroying workload alone is unaffected.
+            if [ "$L" = "foundation" ]; then
+              echo "::group::wait for serverless IP release ($REGION)"
+              wait_for_serverless_release
+              echo "::endgroup::"
+            fi
+
             echo "::group::terraform destroy $L ($ENVIRONMENT)"
             terraform -chdir="$L" init -input=false \
               -backend-config="environments/${ENVIRONMENT}/backend.hcl"

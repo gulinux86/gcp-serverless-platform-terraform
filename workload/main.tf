@@ -151,19 +151,9 @@ resource "google_secret_manager_secret_iam_member" "backend_sa_db_password" {
 # Computing - Cloud Run Services
 # ============================================
 
-# Workload-level IP-release guard: holds the whole layer open for 150s after the
-# Cloud Run modules are destroyed, so Direct VPC Egress IP reservations are
-# released before the destroy pipeline moves on to the foundation layer and tries
-# to delete the subnet. Fires regardless of per-service timer state.
-resource "time_sleep" "vpc_egress_release_guard" {
-  destroy_duration = "150s"
-}
-
 # Backend API Service
 module "backend" {
   source = "../modules/workload/cloud_run_service"
-
-  depends_on = [time_sleep.vpc_egress_release_guard]
 
   name               = "backend"
   region             = var.region
@@ -192,8 +182,6 @@ module "backend" {
 # Frontend App Service
 module "frontend" {
   source = "../modules/workload/cloud_run_service"
-
-  depends_on = [time_sleep.vpc_egress_release_guard]
 
   name               = "frontend"
   region             = var.region

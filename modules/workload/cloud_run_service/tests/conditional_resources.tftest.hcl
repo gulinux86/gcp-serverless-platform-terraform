@@ -107,12 +107,3 @@ run "no_vpc_access_without_subnet" {
     error_message = "No vpc_access block must be rendered when vpc_subnet_id is null — an empty network interface is invalid at apply time."
   }
 }
-
-run "ip_release_cooldown_always_present" {
-  command = plan
-
-  assert {
-    condition     = time_sleep.wait_for_ip_release.destroy_duration == "150s"
-    error_message = "Direct VPC Egress holds per-instance IP reservations that GCP releases asynchronously. Removing this cooldown makes the foundation subnet deletion race against that cleanup and fail intermittently with 'resource in use'."
-  }
-}
