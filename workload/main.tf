@@ -98,28 +98,6 @@ module "secret_rotation" {
   region     = var.region
 }
 
-# State migration: rename inline resources to module-scoped addresses.
-# Remove these moved blocks after the first successful apply.
-moved {
-  from = google_pubsub_topic.secret_rotation
-  to   = module.secret_rotation.google_pubsub_topic.this
-}
-
-moved {
-  from = google_pubsub_topic_iam_member.secretmanager_can_publish
-  to   = module.secret_rotation.google_pubsub_topic_iam_member.this
-}
-
-moved {
-  from = google_cloud_run_v2_job.secret_rotation_handler
-  to   = module.secret_rotation.google_cloud_run_v2_job.this
-}
-
-moved {
-  from = google_pubsub_subscription.secret_rotation_push
-  to   = module.secret_rotation.google_pubsub_subscription.this
-}
-
 module "app_secret" {
   source = "../modules/workload/secret_manager"
 
