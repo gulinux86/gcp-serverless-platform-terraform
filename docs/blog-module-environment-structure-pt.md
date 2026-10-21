@@ -4,6 +4,8 @@ subtitle: "Refatorando uma stack serverless na GCP de um root único para camada
 tags: [Terraform, GCP, InfrastructureAsCode, PlatformEngineering, DevOps]
 ---
 
+> **Atualização:** o Serverless VPC Access Connector descrito neste post foi abandonado depois — ele nunca ficou saudável neste projeto. O Cloud Run agora usa **Direct VPC Egress** na subnet privada do foundation, o `workload` lê `private_subnet_id` (e não `vpc_connector_id`) do remote state, e a pipeline de destroy espera a liberação da reserva de endereço `purpose=SERVERLESS` da subnet. Veja [ARCHITECTURE.md §Cloud Run egress](../ARCHITECTURE.md#cloud-run-egress).
+
 # Topologia de state no Terraform: fronteiras de módulos e ambientes
 
 > **Parte 2 de 2.** A Parte 1 cobre as pipelines de entrega que rodam em cima desta estrutura: [Entregando infraestrutura serverless na GCP com Terraform]([link da Parte 1]).

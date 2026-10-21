@@ -50,22 +50,30 @@ jobs:
         uses: actions/checkout@9f698171ed81b15d1823a05fc7211befd50c8ae0 # v6.0.3
 
       - name: Select environment auth
+        # Secrets reach the script as env vars, never interpolated into its text:
+        # a value containing quotes or $ can't break (or inject into) the shell.
+        env:
+          PROD_WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
+          PROD_WIF_SA: ${{ secrets.PROD_WIF_SA }}
+          PROD_PROJECT_ID: ${{ secrets.PROD_PROJECT_ID }}
+          PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
+          PROD_API_SECRET_KEY: ${{ secrets.PROD_API_SECRET_KEY }}
+          HML_WIF_PROVIDER: ${{ secrets.HML_WIF_PROVIDER }}
+          HML_WIF_SA: ${{ secrets.HML_WIF_SA }}
+          HML_PROJECT_ID: ${{ secrets.HML_PROJECT_ID }}
+          HML_DB_PASSWORD: ${{ secrets.HML_DB_PASSWORD }}
+          HML_API_SECRET_KEY: ${{ secrets.HML_API_SECRET_KEY }}
         run: |
-          if [ "$ENVIRONMENT" = "prod" ]; then
-            echo "WIF_PROVIDER=${{ secrets.PROD_WIF_PROVIDER }}" >> "$GITHUB_ENV"
-            echo "DEPLOYER_SA=${{ secrets.PROD_WIF_SA }}" >> "$GITHUB_ENV"
-            PID='${{ secrets.PROD_PROJECT_ID }}'
-            echo "TF_VAR_db_password=${{ secrets.PROD_DB_PASSWORD }}" >> "$GITHUB_ENV"
-            echo "TF_VAR_api_secret_key=${{ secrets.PROD_API_SECRET_KEY }}" >> "$GITHUB_ENV"
-          else
-            echo "WIF_PROVIDER=${{ secrets.HML_WIF_PROVIDER }}" >> "$GITHUB_ENV"
-            echo "DEPLOYER_SA=${{ secrets.HML_WIF_SA }}" >> "$GITHUB_ENV"
-            PID='${{ secrets.HML_PROJECT_ID }}'
-            echo "TF_VAR_db_password=${{ secrets.HML_DB_PASSWORD }}" >> "$GITHUB_ENV"
-            echo "TF_VAR_api_secret_key=${{ secrets.HML_API_SECRET_KEY }}" >> "$GITHUB_ENV"
-          fi
-          # project_id via secret (masked). State bucket name is non-secret (backend.hcl).
-          echo "TF_VAR_project_id=$PID" >> "$GITHUB_ENV"
+          if [ "$ENVIRONMENT" = "prod" ]; then P=PROD; else P=HML; fi
+          v() { local n="${P}_$1"; printf '%s' "${!n}"; }
+          {
+            echo "WIF_PROVIDER=$(v WIF_PROVIDER)"
+            echo "DEPLOYER_SA=$(v WIF_SA)"
+            # project_id via secret (masked). State bucket name is non-secret (backend.hcl).
+            echo "TF_VAR_project_id=$(v PROJECT_ID)"
+            echo "TF_VAR_db_password=$(v DB_PASSWORD)"
+            echo "TF_VAR_api_secret_key=$(v API_SECRET_KEY)"
+          } >> "$GITHUB_ENV"
 
       - name: Authenticate to GCP (Workload Identity Federation)
         uses: google-github-actions/auth@v2 # TODO: pin to a commit SHA

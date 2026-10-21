@@ -17,8 +17,8 @@ variable "deployer_roles" {
   description = "Project-level roles granted to the deployer service account. Scoped to exactly what the foundation + workload layers provision."
   type        = list(string)
   default = [
-    "roles/compute.networkAdmin",            # VPC, subnets, firewall, addresses
-    "roles/vpcaccess.admin",                 # Serverless VPC Access Connector
+    "roles/compute.networkAdmin",            # VPC, subnets, addresses, LB components
+    "roles/compute.securityAdmin",           # Firewall rules, Cloud Armor policy, SSL certs
     "roles/servicenetworking.networksAdmin", # PSA peering for Cloud SQL
     "roles/run.admin",                       # Cloud Run services + jobs
     "roles/cloudsql.admin",                  # Cloud SQL instance + database

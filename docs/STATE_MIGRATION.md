@@ -14,11 +14,13 @@ gs://<bucket>/root/             gs://<bucket>/hml/foundation/
 
 On top of the restructure, the resource graph itself changed:
 
-- **VPC Access Connector added** (`module.vpc.google_vpc_access_connector.this`) —
-  not present in the old state.
+- **Cloud Run egress stays on Direct VPC Egress** — a Serverless VPC Access
+  Connector was introduced during the migration and then abandoned (see
+  ARCHITECTURE.md §"Cloud Run egress"); no connector exists in the new graph.
 - **IP-release guards removed** — `time_sleep.wait_for_ip_release`,
   `time_sleep.vpc_egress_release_guard`, and `terraform_data.serverless_signal`
-  no longer exist.
+  no longer exist. The serverless address reservation is now waited out by the
+  `terraform-destroy` pipeline instead.
 - **Addresses reshaped** — old `module.foundation.module.vpc.*` becomes
   `module.vpc.*` in the foundation state; old `module.workload.module.backend.*`
   becomes `module.backend.*` in the workload state.
@@ -102,8 +104,7 @@ terraform state pull > root.tfstate
 #    module.workload.module.frontend.time_sleep.wait_for_ip_release
 
 # 5. Push each split state to its env-prefixed backend, then run `plan`.
-#    The VPC Access Connector will show as a CREATE (it is genuinely new).
+#    Expect no connector in the plan — egress is Direct VPC Egress.
 ```
 
-This is error-prone (address rewriting, the connector create, PSA/peering
-ordering). Prefer the clean re-apply unless you have irreplaceable state.
+This is error-prone (address rewriting, PSA/peering ordering). Prefer the clean re-apply unless you have irreplaceable state.

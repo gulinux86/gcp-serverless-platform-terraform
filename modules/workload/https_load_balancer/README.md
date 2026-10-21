@@ -65,13 +65,16 @@ The `api_cloud_run_service_name` variable is used in `count` expressions. It mus
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
 
-No requirements.
+| Name | Version |
+| ---- | ------- |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.7.0 |
+| <a name="requirement_google"></a> [google](#requirement\_google) | >= 5.0.0 |
 
 ## Providers
 
 | Name | Version |
-|------|---------|
-| <a name="provider_google"></a> [google](#provider\_google) | n/a |
+| ---- | ------- |
+| <a name="provider_google"></a> [google](#provider\_google) | 7.35.0 |
 
 ## Modules
 
@@ -80,7 +83,7 @@ No modules.
 ## Resources
 
 | Name | Type |
-|------|------|
+| ---- | ---- |
 | [google_compute_backend_service.api](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_backend_service) | resource |
 | [google_compute_backend_service.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_backend_service) | resource |
 | [google_compute_global_address.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_global_address) | resource |
@@ -98,7 +101,7 @@ No modules.
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
+| ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_cloud_run_service_name"></a> [cloud\_run\_service\_name](#input\_cloud\_run\_service\_name) | Name of the Cloud Run service to front with this load balancer | `string` | n/a | yes |
 | <a name="input_name"></a> [name](#input\_name) | Base name for load balancer resources | `string` | n/a | yes |
 | <a name="input_project_id"></a> [project\_id](#input\_project\_id) | GCP Project ID | `string` | n/a | yes |
@@ -111,7 +114,7 @@ No modules.
 ## Outputs
 
 | Name | Description |
-|------|-------------|
+| ---- | ----------- |
 | <a name="output_api_backend_service_self_link"></a> [api\_backend\_service\_self\_link](#output\_api\_backend\_service\_self\_link) | Self-link of the API backend service (null when api\_cloud\_run\_service\_name is not set) |
 | <a name="output_load_balancer_ip"></a> [load\_balancer\_ip](#output\_load\_balancer\_ip) | Global IP address of the HTTPS load balancer |
 | <a name="output_ssl_certificate_name"></a> [ssl\_certificate\_name](#output\_ssl\_certificate\_name) | Name of the managed SSL certificate (null when domain not set) |

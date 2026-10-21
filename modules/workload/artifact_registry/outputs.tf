@@ -9,6 +9,6 @@ output "repository_name" {
 }
 
 output "repository_url" {
-  description = "Repository URL"
-  value       = google_artifact_registry_repository.this.name
+  description = "Registry host path for pushing/pulling images (<location>-docker.pkg.dev/<project>/<repository_id>). Only meaningful for format = DOCKER."
+  value       = "${google_artifact_registry_repository.this.location}-docker.pkg.dev/${google_artifact_registry_repository.this.project}/${google_artifact_registry_repository.this.repository_id}"
 }

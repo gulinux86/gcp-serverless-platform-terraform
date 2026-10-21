@@ -5,13 +5,16 @@ VPC firewall rules for ingress traffic control.
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
 
-No requirements.
+| Name | Version |
+| ---- | ------- |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.7.0 |
+| <a name="requirement_google"></a> [google](#requirement\_google) | >= 5.0.0 |
 
 ## Providers
 
 | Name | Version |
-|------|---------|
-| <a name="provider_google"></a> [google](#provider\_google) | n/a |
+| ---- | ------- |
+| <a name="provider_google"></a> [google](#provider\_google) | 7.35.0 |
 
 ## Modules
 
@@ -20,14 +23,14 @@ No modules.
 ## Resources
 
 | Name | Type |
-|------|------|
+| ---- | ---- |
 | [google_compute_firewall.allow_internal](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_firewall) | resource |
 | [google_compute_firewall.deny_external](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_firewall) | resource |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
+| ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_name"></a> [name](#input\_name) | Base name for firewall rules | `string` | n/a | yes |
 | <a name="input_network_name"></a> [network\_name](#input\_network\_name) | VPC network name | `string` | n/a | yes |
 | <a name="input_allowed_ports"></a> [allowed\_ports](#input\_allowed\_ports) | TCP ports to allow inbound. Defaults to HTTP (80), HTTPS (443), and common application port (8080). | `list(string)` | <pre>[<br/>  "80",<br/>  "443",<br/>  "8080"<br/>]</pre> | no |
@@ -38,6 +41,6 @@ No modules.
 ## Outputs
 
 | Name | Description |
-|------|-------------|
-| <a name="output_firewall_rule_name"></a> [firewall\_rule\_name](#output\_firewall\_rule\_name) | Nome da regra de firewall |
+| ---- | ----------- |
+| <a name="output_firewall_rule_name"></a> [firewall\_rule\_name](#output\_firewall\_rule\_name) | Name of the internal allow firewall rule |
 <!-- END_TF_DOCS -->

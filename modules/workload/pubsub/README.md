@@ -5,13 +5,16 @@ Pub/Sub topic with optional subscription.
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
 
-No requirements.
+| Name | Version |
+| ---- | ------- |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.7.0 |
+| <a name="requirement_google"></a> [google](#requirement\_google) | >= 5.0.0 |
 
 ## Providers
 
 | Name | Version |
-|------|---------|
-| <a name="provider_google"></a> [google](#provider\_google) | n/a |
+| ---- | ------- |
+| <a name="provider_google"></a> [google](#provider\_google) | >= 5.0.0 |
 
 ## Modules
 
@@ -20,14 +23,14 @@ No modules.
 ## Resources
 
 | Name | Type |
-|------|------|
+| ---- | ---- |
 | [google_pubsub_subscription.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_subscription) | resource |
 | [google_pubsub_topic.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_topic) | resource |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
+| ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_topic_name"></a> [topic\_name](#input\_topic\_name) | Pub/Sub topic name | `string` | n/a | yes |
 | <a name="input_ack_deadline_seconds"></a> [ack\_deadline\_seconds](#input\_ack\_deadline\_seconds) | ACK deadline in seconds | `number` | `20` | no |
 | <a name="input_create_subscription"></a> [create\_subscription](#input\_create\_subscription) | Automatically create a subscription | `bool` | `true` | no |
@@ -41,7 +44,7 @@ No modules.
 ## Outputs
 
 | Name | Description |
-|------|-------------|
+| ---- | ----------- |
 | <a name="output_subscription_id"></a> [subscription\_id](#output\_subscription\_id) | Pub/Sub subscription ID |
 | <a name="output_subscription_name"></a> [subscription\_name](#output\_subscription\_name) | Pub/Sub subscription name |
 | <a name="output_topic_id"></a> [topic\_id](#output\_topic\_id) | Pub/Sub topic ID |

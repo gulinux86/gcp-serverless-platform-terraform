@@ -1,5 +1,5 @@
 output "firewall_rule_name" {
-  description = "Nome da regra de firewall"
+  description = "Name of the internal allow firewall rule"
   value       = google_compute_firewall.allow_internal.name
 }
 

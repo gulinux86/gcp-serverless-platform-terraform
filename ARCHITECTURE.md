@@ -13,7 +13,7 @@ This document outlines a serverless-first GCP architecture for a two-tier web ap
                                                 │
                                     ┌───────────▼───────────┐
                                     │   Global Anycast IP    │
-                                    │   (34.8.68.173)        │
+                                    │   (load_balancer_ip)   │
                                     └───────────┬────────────┘
                                                 │
                               ┌─────────────────▼──────────────────┐
@@ -35,7 +35,7 @@ This document outlines a serverless-first GCP architecture for a two-tier web ap
                    │   ingress: LB only     │       │   ingress: LB only       │
                    │   SA: frontend-sa      │       │   SA: backend-sa         │
                    │   Direct VPC Egress    │       │   Direct VPC Egress      │
-                   │   GCS FUSE mount       │       │   Secret Manager refs    │
+                   │                        │       │   GCS FUSE · Secret refs │
                    └───────────────────────┘       └────────────┬─────────────┘
                                                                 │
                                           ┌─────────────────────▼──────────────────┐
@@ -58,7 +58,7 @@ This document outlines a serverless-first GCP architecture for a two-tier web ap
                               ┌──────────────────────────▼───────────────────────┐
                               │              Supporting Services                  │
                               │                                                   │
-                              │  Cloud Storage  ──  GCS FUSE mount in Cloud Run  │
+                              │  Cloud Storage  ──  GCS FUSE mount in backend    │
                               │  Artifact Registry  ──  Docker image storage      │
                               │  Secret Manager  ──  app-api-key, db-password    │
                               │  Pub/Sub  ──  secret rotation trigger topic       │
@@ -101,7 +101,7 @@ Owns the base networking environment. Nothing application-specific lives here. T
 | Service Networking Connection | `modules/foundation/vpc` | Peering for managed services (Cloud SQL) |
 | Firewall Rules | `modules/foundation/cloud_firewall` | Allow ports 443 + 8080 from RFC-1918 |
 | VPC Flow Logs | `modules/foundation/vpc` | Full metadata logging on private subnet |
-| Terraform State Bucket | `foundation/state_bucket.tf` | GCS bucket for remote state |
+| Terraform State Bucket | — (created with `gcloud`, documented in `foundation/state_bucket.tf`) | Remote state; intentionally **not** managed by Terraform |
 
 ### Layer 2 — Workload (Compute & Data)
 
@@ -111,18 +111,18 @@ Owns everything application-specific. Reads the foundation layer's remote state 
 
 | Resource Group | Modules Used | Purpose |
 |----------------|-------------|---------|
-| IAM | `workload/iam_service_account` | `backend-sa`, `frontend-sa` — PoLP identities |
+| IAM | `workload/iam_service_account` | `backend-sa`, `frontend-sa` — PoLP identities (storage + secret grants are per-resource) |
 | Artifact Registry | `workload/artifact_registry` | Docker image store for Cloud Run |
 | Cloud Run (frontend) | `workload/cloud_run_service` | Frontend app, LB ingress only |
 | Cloud Run (backend) | `workload/cloud_run_service` | Backend API, LB ingress only, GCS FUSE mount |
 | Cloud SQL | `workload/cloud_sql` | PostgreSQL 15, private IP via PSA, no public IP |
 | Cloud Storage | `workload/cloud_storage` | App file storage, FUSE-mounted in backend |
-| Secret Manager | `workload/secret_manager` | `app-api-key`, `db-password` with 30-day rotation |
-| Secret Rotation | `workload/secret_rotation` | Pub/Sub topic + Cloud Run Job for automated rotation |
+| Secret Manager | `workload/secret_manager` | `app-api-key`, `db-password` with 30-day rotation notifications |
+| Secret Rotation | `workload/secret_rotation` | Pub/Sub topic + Cloud Run Job (placeholder handler; push trigger is a known limitation — see module README) |
 | Cloud Armor | `workload/cloud_armor` | WAF security policy (OWASP + rate limit + Adaptive Protection) |
 | HTTPS Load Balancer | `workload/https_load_balancer` | Global LB, path routing, Cloud Armor attachment |
 | Monitoring | inline in `workload/main.tf` | Alert policies: frontend error rate, latency, SQL disk |
-| Audit Logging | inline in `workload/main.tf` | Project audit log sink → GCS bucket (365-day retention) |
+| Audit Logging | inline in `workload/main.tf` | Project audit log sink → GCS bucket (365-day retention; not force-destroyed in prod) |
 
 ---
 
@@ -174,6 +174,8 @@ Layer 2: Load Balancer Ingress Restriction
   - Both Cloud Run services: ingress = INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER
   - Direct *.run.app access rejected (HTTP 403)
   - All traffic must pass through LB → Cloud Armor
+  - Both grant run.invoker to allUsers: the external LB sends no identity
+    token, so ingress (not IAM) is the access control
 
 Layer 3: Service-to-Service (no longer needed)
   - Frontend no longer proxies to backend (LB handles routing)
@@ -181,18 +183,22 @@ Layer 3: Service-to-Service (no longer needed)
 
 Layer 4: Database Isolation
   - Cloud SQL: no public IP
-  - Reachable only via PSA peering from VPC
-  - backend-sa has roles/cloudsql.client (read/write), not admin
+  - Reachable only via PSA peering from VPC (backend → private IP, sslmode=require)
+  - TLS enforced on the instance (ssl_mode = ENCRYPTED_ONLY)
+  - backend-sa has roles/cloudsql.client, not admin
 
 Layer 5: Secret Management
   - Secrets stored in Secret Manager, never in env vars as plaintext
   - Secret env vars injected at runtime via Cloud Run secret references
   - backend-sa has secretAccessor only on its own secrets (PoLP)
-  - Automatic 30-day rotation via Pub/Sub + Cloud Run Job
+  - Initial values (TF_VAR_*) are stored in Terraform state — protect the bucket
+  - 30-day rotation notifications → Pub/Sub → Cloud Run Job (handler is a
+    placeholder; the push trigger needs rework, see secret_rotation README)
 
 Layer 6: Audit Logging
   - All cloudaudit.googleapis.com logs exported to GCS
-  - 365-day retention, force_destroy=false (preserved on terraform destroy)
+  - 365-day retention; force_destroy=false in prod (preserved on terraform
+    destroy), true in hml (routine teardown)
 ```
 
 ### IAM Principle of Least Privilege
@@ -200,10 +206,10 @@ Layer 6: Audit Logging
 | Service Account | Roles | Scope |
 |-----------------|-------|-------|
 | `backend-sa` | `roles/cloudsql.client` | Project |
-| `backend-sa` | `roles/storage.objectViewer` | Project |
+| `backend-sa` | `roles/storage.objectUser` | App storage bucket only (read-write FUSE mount) |
 | `backend-sa` | `roles/secretmanager.secretAccessor` | Per-secret (app-api-key, db-password) |
-| `frontend-sa` | `roles/storage.objectViewer` | Project |
-| `rotation-invoker` | `roles/run.invoker` | Secret rotation Cloud Run Job only |
+| `frontend-sa` | — | No roles (runtime identity only) |
+| `<name>-rotation-invoker` | `roles/run.invoker` | Secret rotation Cloud Run Job only |
 
 ---
 
@@ -290,7 +296,7 @@ gcloud compute networks vpc-access connectors delete <name> --region <region>
 
 ## Destroy Orchestration
 
-Teardown has two independent hazards, each with its own guard.
+Teardown has three independent hazards, each with its own guard.
 
 1. **Layer order.** `workload` must be destroyed before `foundation` (the workload
    reads foundation's state and attaches to its subnet). The `terraform-destroy`
@@ -355,7 +361,7 @@ modules/
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | Compute | Cloud Run v2 (not GKE) | No cluster management, scale-to-zero, lower operational overhead |
-| Networking | Direct VPC Egress (not a Serverless VPC Access Connector) | No connector fleet to keep healthy and no idle cost; the price is per-instance IP reservations, handled by the release cooldowns |
+| Networking | Direct VPC Egress (not a Serverless VPC Access Connector) | No connector fleet to keep healthy and no idle cost; the price is a `purpose=SERVERLESS` address reservation per subnet attachment, waited out by the destroy pipeline's IP-release gate |
 | LB routing | Path-based at LB layer | Cloud Armor covers both services; frontend not in request path for API |
 | Database access | PSA (not Cloud SQL Auth Proxy) | Lower latency, no sidecar, private IP enforced at network level |
 | Secret injection | Secret Manager env var refs | Secrets never in plaintext; versioned + auditable |
@@ -363,4 +369,4 @@ modules/
 | Layering | Two independent roots (no root orchestrator) | Smaller blast radius; deploy `workload` without touching networking |
 | CI/CD | GitHub Actions (test, security-scan, plan, deploy, destroy) | Plan-on-PR, manual gated apply, confirmed destroy, per-layer selection |
 | CI auth | Workload Identity Federation (keyless) | No long-lived SA keys in GitHub; per-env pool + deployer SA (see `bootstrap/`) |
-| Ingress default | `INGRESS_TRAFFIC_INTERNAL_ONLY` | Secure by default; services must explicitly opt into LB exposure |
+| Ingress default | `INGRESS_TRAFFIC_INTERNAL_ONLY` (module default) | Secure by default; both services here explicitly opt into `INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER` |

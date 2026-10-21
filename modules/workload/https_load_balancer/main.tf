@@ -53,7 +53,7 @@ resource "google_compute_backend_service" "this" {
   project               = var.project_id
   protocol              = "HTTPS"
   load_balancing_scheme = "EXTERNAL_MANAGED"
-  security_policy       = var.security_policy_id != null ? var.security_policy_id : null
+  security_policy       = var.security_policy_id
 
   backend {
     group = google_compute_region_network_endpoint_group.this.self_link
@@ -68,7 +68,7 @@ resource "google_compute_backend_service" "api" {
   project               = var.project_id
   protocol              = "HTTPS"
   load_balancing_scheme = "EXTERNAL_MANAGED"
-  security_policy       = var.security_policy_id != null ? var.security_policy_id : null
+  security_policy       = var.security_policy_id
 
   backend {
     group = google_compute_region_network_endpoint_group.api[0].self_link
@@ -106,7 +106,7 @@ resource "google_compute_url_map" "with_api" {
     default_service = google_compute_backend_service.this.self_link
 
     path_rule {
-      paths   = ["${var.api_path_prefix}", "${var.api_path_prefix}/*"]
+      paths   = [var.api_path_prefix, "${var.api_path_prefix}/*"]
       service = google_compute_backend_service.api[0].self_link
     }
   }

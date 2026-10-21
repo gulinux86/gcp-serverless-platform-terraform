@@ -10,5 +10,5 @@ output "secret_name" {
 
 output "secret_version" {
   description = "Secret version (if created)"
-  value       = var.secret_value != null ? google_secret_manager_secret_version.this[0].name : null
+  value       = one(google_secret_manager_secret_version.this[*].name)
 }
