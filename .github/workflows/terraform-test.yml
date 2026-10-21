@@ -49,9 +49,8 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Setup Terraform
-        # mock_provider requires Terraform >= 1.7.0 — cannot use ~> 1.5 here.
-        # The plan/deploy pipelines stay on ~> 1.5 since they target root modules
-        # with real backends. Module tests are independent and need the newer version.
+        # mock_provider requires Terraform >= 1.7.0. Same version line (~> 1.9)
+        # as the plan/deploy/destroy pipelines.
         # Current tag: hashicorp/setup-terraform@v3
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
         with:

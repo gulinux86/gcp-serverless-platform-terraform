@@ -22,6 +22,13 @@ resource "google_secret_manager_secret" "this" {
   }
 
   labels = var.labels
+
+  # next_rotation_time is derived from timestamp(), which changes on every run.
+  # Without this, every plan shows an in-place update on each rotating secret.
+  # Secret Manager advances next_rotation_time itself after each rotation.
+  lifecycle {
+    ignore_changes = [rotation[0].next_rotation_time]
+  }
 }
 
 resource "google_secret_manager_secret_version" "this" {

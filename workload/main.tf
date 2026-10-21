@@ -23,9 +23,10 @@ module "backend_sa" {
   display_name = "Backend Service Account"
   project_id   = var.project_id
 
+  # Storage access is granted on the app bucket only (see backend_sa_storage),
+  # not project-wide — a project-level grant would also expose the audit logs.
   iam_roles = {
-    "roles/cloudsql.client"      = "roles/cloudsql.client"
-    "roles/storage.objectViewer" = "roles/storage.objectViewer"
+    "roles/cloudsql.client" = "roles/cloudsql.client"
   }
 }
 
@@ -36,10 +37,6 @@ module "frontend_sa" {
   account_id   = "frontend-sa"
   display_name = "Frontend Service Account"
   project_id   = var.project_id
-
-  iam_roles = {
-    "roles/storage.objectViewer" = "roles/storage.objectViewer"
-  }
 }
 
 # ============================================
@@ -68,7 +65,6 @@ module "database" {
   db_password         = var.db_password
   tier                = "db-f1-micro"
   availability_type   = "REGIONAL"
-  public_ip           = false
   deletion_protection = false
   vpc_network_id      = local.vpc_network_id
   vpc_peering_id      = local.vpc_peering_id
@@ -79,6 +75,14 @@ module "storage" {
 
   name     = "${var.name}-storage-${var.project_id}"
   location = var.region
+}
+
+# The backend mounts this bucket read-write via GCS FUSE, so it needs object
+# read + write (objectUser), scoped to this bucket only.
+resource "google_storage_bucket_iam_member" "backend_sa_storage" {
+  bucket = module.storage.bucket_name
+  role   = "roles/storage.objectUser"
+  member = "serviceAccount:${module.backend_sa.email}"
 }
 
 # ============================================
@@ -159,15 +163,22 @@ module "backend" {
   region             = var.region
   image              = "gcr.io/cloudrun/hello"
   ingress            = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
-  make_public        = false
   min_instance_count = 1
+
+  # The external LB forwards requests without an identity token, so the service
+  # must allow unauthenticated invocation or every /api request gets a 403 from
+  # Cloud Run IAM. Network exposure is still restricted by `ingress` above:
+  # direct *.run.app calls are rejected, only LB (and Cloud Armor) traffic lands.
+  make_public = true
 
   service_account_email = module.backend_sa.email
   vpc_subnet_id         = local.vpc_subnet_id
   gcs_bucket_name       = module.storage.bucket_name
 
   env_vars = {
-    DATABASE_URL = "postgresql://appuser@/${module.database.database_name}?host=/cloudsql/${module.database.connection_name}"
+    # Private IP over PSA via Direct VPC Egress — no Cloud SQL Auth Proxy socket
+    # is mounted. sslmode=require matches the instance's ssl_mode = ENCRYPTED_ONLY.
+    DATABASE_URL = "postgresql://${module.database.db_user}@${module.database.private_ip}:5432/${module.database.database_name}?sslmode=require"
     SECRET_NAME  = module.app_secret.secret_name
   }
 
@@ -191,9 +202,7 @@ module "frontend" {
 
   service_account_email = module.frontend_sa.email
   vpc_subnet_id         = local.vpc_subnet_id
-
 }
-
 
 # ============================================
 # Cloud Armor WAF Security Policy
@@ -232,14 +241,23 @@ resource "google_monitoring_alert_policy" "frontend_error_rate" {
 
   conditions {
     display_name = "Cloud Run frontend error rate > 1%"
+    # Ratio condition: 5xx requests / all requests. Without the denominator the
+    # threshold would compare a raw rate (0.01 req/s), not a percentage.
     condition_threshold {
-      filter          = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"frontend\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"5xx\""
-      duration        = "300s"
-      comparison      = "COMPARISON_GT"
-      threshold_value = 0.01
+      filter             = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${module.frontend.name}\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"5xx\""
+      denominator_filter = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${module.frontend.name}\" AND metric.type = \"run.googleapis.com/request_count\""
+      duration           = "300s"
+      comparison         = "COMPARISON_GT"
+      threshold_value    = 0.01
       aggregations {
-        alignment_period   = "300s"
-        per_series_aligner = "ALIGN_RATE"
+        alignment_period     = "300s"
+        per_series_aligner   = "ALIGN_RATE"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+      denominator_aggregations {
+        alignment_period     = "300s"
+        per_series_aligner   = "ALIGN_RATE"
+        cross_series_reducer = "REDUCE_SUM"
       }
     }
   }
@@ -256,7 +274,7 @@ resource "google_monitoring_alert_policy" "frontend_latency" {
   conditions {
     display_name = "Cloud Run frontend p99 latency > 2000ms"
     condition_threshold {
-      filter          = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"frontend\" AND metric.type = \"run.googleapis.com/request_latencies\""
+      filter          = "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"${module.frontend.name}\" AND metric.type = \"run.googleapis.com/request_latencies\""
       duration        = "300s"
       comparison      = "COMPARISON_GT"
       threshold_value = 2000
@@ -304,7 +322,9 @@ resource "google_storage_bucket" "audit_logs" {
   name                        = "${var.name}-audit-logs-${var.project_id}"
   location                    = var.region
   uniform_bucket_level_access = true
-  force_destroy               = true
+  # Audit logs outlive a prod teardown: destroy fails on a non-empty bucket
+  # instead of silently deleting them. Non-prod envs are torn down routinely.
+  force_destroy = var.environment != "prod"
 
   lifecycle_rule {
     action { type = "Delete" }

@@ -62,18 +62,6 @@ variable "backup_start_time" {
   default     = "03:00"
 }
 
-variable "public_ip" {
-  description = "Enable public IP"
-  type        = bool
-  default     = false
-}
-
-variable "authorized_network" {
-  description = "CIDR block permitted to connect over the public IP. Only relevant when `public_ip = true`; ignored for private-only instances."
-  type        = string
-  default     = "0.0.0.0/0"
-}
-
 variable "vpc_network_id" {
   description = "VPC network ID for private connectivity"
   type        = string

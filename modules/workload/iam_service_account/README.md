@@ -5,13 +5,16 @@ Service account with configurable IAM role bindings.
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
 
-No requirements.
+| Name | Version |
+| ---- | ------- |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.7.0 |
+| <a name="requirement_google"></a> [google](#requirement\_google) | >= 5.0.0 |
 
 ## Providers
 
 | Name | Version |
-|------|---------|
-| <a name="provider_google"></a> [google](#provider\_google) | n/a |
+| ---- | ------- |
+| <a name="provider_google"></a> [google](#provider\_google) | 7.35.0 |
 
 ## Modules
 
@@ -20,7 +23,7 @@ No modules.
 ## Resources
 
 | Name | Type |
-|------|------|
+| ---- | ---- |
 | [google_project_iam_member.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_service_account.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/service_account) | resource |
 | [google_service_account_iam_member.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/service_account_iam_member) | resource |
@@ -29,7 +32,7 @@ No modules.
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
+| ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_account_id"></a> [account\_id](#input\_account\_id) | Service account ID (the part of the email before @) | `string` | n/a | yes |
 | <a name="input_project_id"></a> [project\_id](#input\_project\_id) | GCP Project ID | `string` | n/a | yes |
 | <a name="input_create_key"></a> [create\_key](#input\_create\_key) | Create service account key | `bool` | `false` | no |
@@ -42,9 +45,9 @@ No modules.
 ## Outputs
 
 | Name | Description |
-|------|-------------|
-| <a name="output_email"></a> [email](#output\_email) | Email da service account |
-| <a name="output_key_id"></a> [key\_id](#output\_key\_id) | ID da chave (se criada) |
-| <a name="output_name"></a> [name](#output\_name) | Nome completo da service account |
-| <a name="output_unique_id"></a> [unique\_id](#output\_unique\_id) | ID único da service account |
+| ---- | ----------- |
+| <a name="output_email"></a> [email](#output\_email) | Service account email |
+| <a name="output_key_id"></a> [key\_id](#output\_key\_id) | Service account key ID (null when create\_key = false) |
+| <a name="output_name"></a> [name](#output\_name) | Fully qualified service account name (projects/PROJECT/serviceAccounts/EMAIL) |
+| <a name="output_unique_id"></a> [unique\_id](#output\_unique\_id) | Service account unique numeric ID |
 <!-- END_TF_DOCS -->

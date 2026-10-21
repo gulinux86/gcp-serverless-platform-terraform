@@ -58,31 +58,43 @@ jobs:
       # WIF provider secret exists for this environment.
       - name: Select environment
         id: env
+        # Secrets reach the script as env vars, never interpolated into its text:
+        # a value containing quotes or $ can't break (or inject into) the shell.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_ENV: ${{ github.event.inputs.environment }}
+          BASE_REF: ${{ github.base_ref }}
+          PROD_WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
+          PROD_WIF_SA: ${{ secrets.PROD_WIF_SA }}
+          PROD_PROJECT_ID: ${{ secrets.PROD_PROJECT_ID }}
+          PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
+          PROD_API_SECRET_KEY: ${{ secrets.PROD_API_SECRET_KEY }}
+          HML_WIF_PROVIDER: ${{ secrets.HML_WIF_PROVIDER }}
+          HML_WIF_SA: ${{ secrets.HML_WIF_SA }}
+          HML_PROJECT_ID: ${{ secrets.HML_PROJECT_ID }}
+          HML_DB_PASSWORD: ${{ secrets.HML_DB_PASSWORD }}
+          HML_API_SECRET_KEY: ${{ secrets.HML_API_SECRET_KEY }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            ENV="${{ github.event.inputs.environment }}"
-          elif [ "${{ github.base_ref }}" = "main" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            ENV="$INPUT_ENV"
+          elif [ "$BASE_REF" = "main" ]; then
             ENV="prod"
           else
             ENV="hml"
           fi
           echo "ENV_NAME=$ENV" >> "$GITHUB_ENV"
-          if [ "$ENV" = "prod" ]; then
-            WIF='${{ secrets.PROD_WIF_PROVIDER }}'; SA='${{ secrets.PROD_WIF_SA }}'
-            PID='${{ secrets.PROD_PROJECT_ID }}'
-            echo "TF_VAR_db_password=${{ secrets.PROD_DB_PASSWORD }}" >> "$GITHUB_ENV"
-            echo "TF_VAR_api_secret_key=${{ secrets.PROD_API_SECRET_KEY }}" >> "$GITHUB_ENV"
-          else
-            WIF='${{ secrets.HML_WIF_PROVIDER }}'; SA='${{ secrets.HML_WIF_SA }}'
-            PID='${{ secrets.HML_PROJECT_ID }}'
-            echo "TF_VAR_db_password=${{ secrets.HML_DB_PASSWORD }}" >> "$GITHUB_ENV"
-            echo "TF_VAR_api_secret_key=${{ secrets.HML_API_SECRET_KEY }}" >> "$GITHUB_ENV"
-          fi
-          echo "WIF_PROVIDER=$WIF" >> "$GITHUB_ENV"
-          echo "DEPLOYER_SA=$SA" >> "$GITHUB_ENV"
-          # project_id is injected as a TF var (secret, masked in logs). The state
-          # bucket name is non-secret and lives in backend.hcl / workload tfvars.
-          echo "TF_VAR_project_id=$PID" >> "$GITHUB_ENV"
+          if [ "$ENV" = "prod" ]; then P=PROD; else P=HML; fi
+          v() { local n="${P}_$1"; printf '%s' "${!n}"; }
+          WIF="$(v WIF_PROVIDER)"
+          {
+            echo "WIF_PROVIDER=$WIF"
+            echo "DEPLOYER_SA=$(v WIF_SA)"
+            # project_id is injected as a TF var (secret, masked in logs). The state
+            # bucket name is non-secret and lives in backend.hcl / workload tfvars.
+            echo "TF_VAR_project_id=$(v PROJECT_ID)"
+            echo "TF_VAR_db_password=$(v DB_PASSWORD)"
+            echo "TF_VAR_api_secret_key=$(v API_SECRET_KEY)"
+          } >> "$GITHUB_ENV"
           if [ -n "$WIF" ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
@@ -152,12 +164,18 @@ jobs:
             fi
           fi
 
-          terraform -chdir="$LAYER" validate >> /tmp/plan_output.txt 2>&1
-          terraform -chdir="$LAYER" plan -no-color -input=false \
-            -var-file="environments/${ENV_NAME}/terraform.tfvars" \
-            > /tmp/plan_output.txt 2>&1
+          # Capture plan's own exit code: `$?` after an echo would always be 0
+          # and a failed plan would pass the "Fail on error" step.
+          if terraform -chdir="$LAYER" validate -no-color > /tmp/plan_output.txt 2>&1; then
+            terraform -chdir="$LAYER" plan -no-color -input=false \
+              -var-file="environments/${ENV_NAME}/terraform.tfvars" \
+              >> /tmp/plan_output.txt 2>&1
+            RC=$?
+          else
+            RC=1
+          fi
           echo "status=plan" >> "$GITHUB_OUTPUT"
-          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+          echo "exitcode=$RC" >> "$GITHUB_OUTPUT"
 
       - name: Comment plan on PR
         if: github.event_name == 'pull_request'

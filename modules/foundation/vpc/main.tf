@@ -10,10 +10,11 @@ resource "google_compute_network" "this" {
 #
 # The connector was tried and abandoned — see ARCHITECTURE.md §"Cloud Run egress".
 # The cost of Direct VPC Egress is that Cloud Run holds per-instance IP
-# reservations in the subnet, and GCP releases them asynchronously after the
-# services are deleted. That is handled by the IP-release cooldowns in the
-# workload layer (modules/workload/cloud_run_service + workload/main.tf) plus the
-# pipeline's layer ordering: workload is always destroyed before foundation.
+# reservations in the subnet, and GCP releases them asynchronously (measured at
+# 1h+) after the services are deleted. That is handled by the serverless
+# IP-release gate in .github/workflows/terraform-destroy.yml plus the pipeline's
+# layer ordering: workload is always destroyed before foundation.
+# See docs/runbooks/serverless-ipv4-reservation.md
 
 resource "google_compute_subnetwork" "private" {
   name                     = "${var.name}-private"
@@ -30,8 +31,8 @@ resource "google_compute_subnetwork" "private" {
   }
 
   # Destruction order:
-  # 1. This subnet is deleted (Cloud Run no longer reserves IPs here — egress
-  #    goes through the VPC Access Connector's own /28).
+  # 1. This subnet is deleted (only possible once GCP has released the
+  #    purpose=SERVERLESS address Direct VPC Egress pinned here).
   # 2. decommissioning_buffer then waits before the PSA connection is removed.
   depends_on = [time_sleep.decommissioning_buffer]
 }

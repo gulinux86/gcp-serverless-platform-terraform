@@ -4,6 +4,8 @@ subtitle: "Um modelo de entrega keyless, em duas camadas, com GitHub Actions par
 tags: [Terraform, GCP, GitHubActions, DevOps, Serverless, CICD]
 ---
 
+> **Atualização:** o Serverless VPC Access Connector descrito neste post foi abandonado depois — ele nunca ficou saudável neste projeto. O Cloud Run agora usa **Direct VPC Egress** na subnet privada do foundation, o `workload` lê `private_subnet_id` (e não `vpc_connector_id`) do remote state, e a pipeline de destroy espera a liberação da reserva de endereço `purpose=SERVERLESS` da subnet. Veja [ARCHITECTURE.md §Cloud Run egress](../ARCHITECTURE.md#cloud-run-egress).
+
 # Entregando infraestrutura serverless na GCP com Terraform: cinco pipelines e os trade-offs por trás delas
 
 > **Parte 1 de 2** sobre construir um modelo de entrega keyless e em duas camadas com Terraform na GCP. A Parte 2 mergulha por baixo do capô: [Topologia de state no Terraform: desenhando fronteiras de módulos e ambientes que escalam]([link da Parte 2]).

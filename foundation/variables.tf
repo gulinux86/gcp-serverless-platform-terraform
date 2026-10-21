@@ -13,9 +13,3 @@ variable "region" {
   description = "Default region"
   default     = "us-central1"
 }
-
-variable "domain_name" {
-  type        = string
-  description = "Domain name for DNS (Optional)"
-  default     = null
-}

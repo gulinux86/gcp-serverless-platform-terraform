@@ -4,6 +4,8 @@ subtitle: "mock_provider, command = plan, and encoding security invariants as co
 tags: [Terraform, GCP, Testing, InfrastructureAsCode, DevOps]
 ---
 
+> **Update:** the Serverless VPC Access Connector described in this post was later abandoned — it never became healthy in this project. Cloud Run now uses **Direct VPC Egress** on the foundation's private subnet, `workload` reads `private_subnet_id` (not `vpc_connector_id`) from remote state, and the destroy pipeline waits out the subnet's `purpose=SERVERLESS` address reservation. See [ARCHITECTURE.md §Cloud Run egress](../ARCHITECTURE.md#cloud-run-egress).
+
 # Testing Terraform Modules Without Touching the Cloud
 
 > **Companion piece** to the delivery-pipeline series: [Shipping Serverless Infrastructure on GCP with Terraform]([Part 1 link]) and [Terraform State Topology]([Part 2 link]). This one goes one layer deeper — the module tests that gate every PR before any plan or apply runs.

@@ -1,6 +1,6 @@
 # cloud_run_service
 
-Cloud Run v2 service that egresses to the VPC through a Serverless VPC Access Connector, with an optional GCS FUSE volume mount and Secret Manager environment variable injection. Configures ingress restriction and min-instance scaling.
+Cloud Run v2 service that egresses to the VPC through Direct VPC Egress (a network interface on a private subnet), with an optional GCS FUSE volume mount and Secret Manager environment variable injection. Configures ingress restriction and min-instance scaling.
 
 ## Usage
 
@@ -12,13 +12,13 @@ module "backend" {
   region                = "us-central1"
   image                 = "us-central1-docker.pkg.dev/my-project/my-repo/backend:latest"
   ingress               = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
-  make_public           = false
+  make_public           = true # required behind an external LB; ingress restricts the network path
   min_instance_count    = 1
   service_account_email = module.backend_sa.email
-  vpc_connector_id      = var.vpc_connector_id
+  vpc_subnet_id         = local.vpc_subnet_id
 
   env_vars = {
-    DATABASE_URL = "postgresql://user@/dbname?host=/cloudsql/project:region:instance"
+    DATABASE_URL = "postgresql://appuser@10.x.x.x:5432/appdb?sslmode=require"
   }
 
   secret_env_vars = {
@@ -32,19 +32,25 @@ module "backend" {
 
 ## Known Behaviors
 
-### VPC Connector egress
+### Direct VPC Egress
 
-The service routes egress through the Serverless VPC Access Connector passed in
-`vpc_connector_id` (created in the foundation `vpc` module). `egress = ALL_TRAFFIC`
-sends all outbound traffic through the VPC so private destinations (e.g. Cloud SQL
-over PSA) stay off the public internet. When `vpc_connector_id` is `null`, no
-`vpc_access` block is rendered. Unlike Direct VPC Egress, the connector holds no
-per-service IP reservations in the application subnet, so there is no destroy-time
-IP-release cooldown.
+When `vpc_subnet_id` is set, the service attaches a network interface to that
+subnet (`vpc_access.network_interfaces`). `egress = ALL_TRAFFIC` sends all outbound
+traffic through the VPC so private destinations (e.g. Cloud SQL over PSA) stay off
+the public internet. When `vpc_subnet_id` is `null`, no `vpc_access` block is
+rendered. GCP pins a `purpose=SERVERLESS` address in the subnet and releases it
+asynchronously after the service is deleted, which delays deleting the subnet —
+see [serverless-ipv4-reservation.md](../../../docs/runbooks/serverless-ipv4-reservation.md).
 
-### `make_public` default
+### `make_public` and the load balancer
 
-The default value for `make_public` is `true`. For production services behind a load balancer, always explicitly set `make_public = false` and use `ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"`.
+`make_public` (default `true`) grants `roles/run.invoker` to `allUsers`. A service
+behind an external Application Load Balancer **needs** this: the LB forwards
+requests without an identity token, so with `make_public = false` every request
+through the LB is rejected with 403. Restrict the network path instead with
+`ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"`, which rejects direct
+`*.run.app` calls. Use `make_public = false` only for services invoked with an
+identity token (service-to-service, Pub/Sub push, Scheduler).
 
 ### GCS FUSE mount
 
@@ -53,13 +59,16 @@ Setting `gcs_bucket_name` mounts the bucket at `mount_path` (default `/mnt/gcs`)
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
 
-No requirements.
+| Name | Version |
+| ---- | ------- |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.7.0 |
+| <a name="requirement_google"></a> [google](#requirement\_google) | >= 5.0.0 |
 
 ## Providers
 
 | Name | Version |
-|------|---------|
-| <a name="provider_google"></a> [google](#provider\_google) | n/a |
+| ---- | ------- |
+| <a name="provider_google"></a> [google](#provider\_google) | 7.35.0 |
 
 ## Modules
 
@@ -68,14 +77,14 @@ No modules.
 ## Resources
 
 | Name | Type |
-|------|------|
+| ---- | ---- |
 | [google_cloud_run_v2_service.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/cloud_run_v2_service) | resource |
 | [google_cloud_run_v2_service_iam_member.noauth](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/cloud_run_v2_service_iam_member) | resource |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
+| ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_image"></a> [image](#input\_image) | Container image (e.g., gcr.io/project/image:tag) | `string` | n/a | yes |
 | <a name="input_name"></a> [name](#input\_name) | Cloud Run service name | `string` | n/a | yes |
 | <a name="input_cpu"></a> [cpu](#input\_cpu) | Container CPU | `string` | `"1"` | no |
@@ -89,12 +98,12 @@ No modules.
 | <a name="input_region"></a> [region](#input\_region) | Deployment region | `string` | `"us-central1"` | no |
 | <a name="input_secret_env_vars"></a> [secret\_env\_vars](#input\_secret\_env\_vars) | Map of env var name to Secret Manager secret reference. Each entry injects the secret value as an environment variable without exposing it as plain text. | <pre>map(object({<br/>    secret  = string<br/>    version = string<br/>  }))</pre> | `{}` | no |
 | <a name="input_service_account_email"></a> [service\_account\_email](#input\_service\_account\_email) | Service account email | `string` | `null` | no |
-| <a name="input_vpc_connector_id"></a> [vpc\_connector\_id](#input\_vpc\_connector\_id) | Serverless VPC Access Connector ID for Cloud Run egress into the VPC. When null, no vpc\_access block is rendered. | `string` | `null` | no |
+| <a name="input_vpc_subnet_id"></a> [vpc\_subnet\_id](#input\_vpc\_subnet\_id) | Private subnet ID for Direct VPC Egress. The service attaches a network interface to this subnet. When null, no vpc\_access block is rendered. | `string` | `null` | no |
 
 ## Outputs
 
 | Name | Description |
-|------|-------------|
+| ---- | ----------- |
 | <a name="output_name"></a> [name](#output\_name) | Cloud Run service name |
 | <a name="output_service_url"></a> [service\_url](#output\_service\_url) | Public URL of the Cloud Run service |
 <!-- END_TF_DOCS -->

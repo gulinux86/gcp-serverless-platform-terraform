@@ -6,6 +6,8 @@
 >
 > Contexto: ver `docs/blog-module-environment-structure.md` (Parte 2 da série), que define a
 > topologia de state atual de 2 camadas × 2 ambientes.
+>
+> **Nota:** o connector citado abaixo foi abandonado; a topologia atual usa Direct VPC Egress e o `foundation` exporta `private_subnet_id` em vez de `vpc_connector_id` (ver ARCHITECTURE.md §Cloud Run egress).
 
 ---
 

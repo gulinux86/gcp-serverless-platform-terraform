@@ -33,7 +33,7 @@ gcloud config set project <project-id>
 │   └── environments/{hml,prod}/terraform.tfvars
 │
 ├── foundation/                 # Layer 1 (independent root): core networking
-│   ├── main.tf                 # VPC, subnets, VPC Connector, PSA, firewall
+│   ├── main.tf                 # VPC, subnets, PSA, firewall
 │   ├── provider.tf             # google provider (per layer)
 │   ├── state_bucket.tf         # Documents state bucket (not managed by Terraform)
 │   ├── version.tf              # Partial GCS backend + provider constraints
@@ -82,7 +82,7 @@ workload/    ── reads ───────────┘   data.terraform_
 
 **Foundation** owns the network (VPC, subnets, PSA, firewall). It must be applied before workload and destroyed after it.
 
-**Workload** owns compute and data. It reads foundation's outputs (`vpc_network_id`, `vpc_connector_id`, `psa_connection_id`) from remote state via `workload/remote_state.tf` — so it cannot plan until foundation is applied. The `terraform-deploy`/`terraform-destroy` pipelines enforce the apply/destroy ordering; `terraform-plan` skips the workload plan with a clear message when foundation has no outputs yet.
+**Workload** owns compute and data. It reads foundation's outputs (`vpc_network_id`, `private_subnet_id`, `psa_connection_id`) from remote state via `workload/remote_state.tf` — so it cannot plan until foundation is applied. The `terraform-deploy`/`terraform-destroy` pipelines enforce the apply/destroy ordering; `terraform-plan` skips the workload plan with a clear message when foundation has no outputs yet.
 
 Each layer is applied per environment by selecting a backend config:
 `terraform -chdir=<layer> init -backend-config=environments/<env>/backend.hcl`.
@@ -92,13 +92,13 @@ Each layer is applied per environment by selecting a backend config:
 | Decision | Choice | Rationale |
 |---|---|---|
 | Compute | Cloud Run v2 (not GKE) | No cluster management, scale-to-zero, per-request billing |
-| VPC connectivity | Direct VPC Egress (not a Serverless VPC Access Connector) | No connector fleet to keep healthy, no idle cost; per-instance IP reservations handled by release cooldowns (ARCHITECTURE.md §Cloud Run egress) |
+| VPC connectivity | Direct VPC Egress (not a Serverless VPC Access Connector) | No connector fleet to keep healthy, no idle cost; the subnet's `purpose=SERVERLESS` address reservation is waited out by the destroy pipeline's IP-release gate (ARCHITECTURE.md §Cloud Run egress) |
 | LB routing | Path-based at LB layer (`/api/*` → backend, `/*` → frontend) | Cloud Armor covers both services; frontend not in API request path |
 | Database access | PSA private IP (not Cloud SQL Auth Proxy) | Lower latency, no sidecar, network-level enforcement |
 | Secret injection | Secret Manager env var refs | Secrets never in plaintext; versioned and auditable |
 | Layering | Two independent roots + per-env state | Smaller blast radius; `workload` reads `foundation` via remote state |
 | CI/CD auth | Workload Identity Federation (keyless) | No long-lived SA keys in GitHub (see `bootstrap/`) |
-| Ingress default | `INGRESS_TRAFFIC_INTERNAL_ONLY` | Secure by default; public access must be explicitly opted into |
+| Ingress default | `INGRESS_TRAFFIC_INTERNAL_ONLY` (module default) | Secure by default; both services here explicitly opt into `INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER` |
 
 ---
 
@@ -153,16 +153,19 @@ terraform -chdir=workload apply -var-file=environments/$ENV/terraform.tfvars
 
 ### Destroy
 
-Destroy runs per layer in reverse order (**workload before foundation**), which the `terraform-destroy` workflow handles when you pick `layer: both`. The workload layer holds itself open for ~150s so GCP can release Direct VPC Egress IP reservations before the foundation subnet is deleted. Locally (with the same `TF_VAR_*` exports as the deploy step):
+Destroy runs per layer in reverse order (**workload before foundation**), which the `terraform-destroy` workflow handles when you pick `layer: both`. Before destroying the foundation, the workflow polls (up to 120 min) until GCP has released the `purpose=SERVERLESS` address that Direct VPC Egress pins in the private subnet — measured at over an hour after the services are gone. Locally (with the same `TF_VAR_*` exports as the deploy step), wait for that release yourself before the foundation destroy:
 ```bash
 ENV=hml
 terraform -chdir=workload init -backend-config=environments/$ENV/backend.hcl
 terraform -chdir=workload destroy -var-file=environments/$ENV/terraform.tfvars
 
+# must print nothing before the foundation destroy can succeed
+gcloud compute addresses list --regions=us-central1 --filter="purpose=SERVERLESS"
+
 terraform -chdir=foundation init -backend-config=environments/$ENV/backend.hcl
 terraform -chdir=foundation destroy -var-file=environments/$ENV/terraform.tfvars
 ```
-The foundation destroy still waits ~10 min on the PSA lock buffer (`decommissioning_buffer`) before removing the peering and VPC. The state bucket is preserved; delete it manually when no longer needed.
+The foundation destroy still waits ~10 min on the PSA lock buffer (`decommissioning_buffer`) before removing the peering and VPC. The state bucket is preserved; delete it manually when no longer needed. In `prod` the audit-log bucket is not force-destroyed (see Security Model §6), so a prod workload destroy stops there while it holds logs.
 
 See [docs/STATE_MIGRATION.md](docs/STATE_MIGRATION.md) if migrating from the old single-root layout.
 
@@ -192,30 +195,31 @@ Defense in depth — six layers:
 Applied to both the frontend and API backend services on the Global Load Balancer. Rules: OWASP Top 10 managed rules (SQLi, XSS), rate limiting (100 req/min per IP → 429), and ML-based Adaptive Protection.
 
 **2. Load Balancer Ingress Restriction**
-Both Cloud Run services are configured with `ingress = INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER`. Direct `*.run.app` requests are rejected with HTTP 403. All traffic must pass through the LB and Cloud Armor.
+Both Cloud Run services are configured with `ingress = INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER`. Direct `*.run.app` requests are rejected with HTTP 403. All traffic must pass through the LB and Cloud Armor. Because the external LB forwards requests without an identity token, both services grant `roles/run.invoker` to `allUsers` — the ingress setting, not IAM, is the access control here.
 
 **3. Path-Based Routing (no frontend proxy)**
 `/api` and `/api/*` routes are handled by the LB URL map directly to the backend Cloud Run service. The frontend never proxies API requests — all traffic paths are covered by Cloud Armor at the LB.
 
 **4. Database Isolation**
-Cloud SQL has no public IP. It is reachable only via Private Service Access (PSA) peering from within the VPC. The backend service account has `roles/cloudsql.client` only — not admin.
+Cloud SQL has no public IP. It is reachable only via Private Service Access (PSA) peering from within the VPC; the backend connects to its private IP over TLS (`sslmode=require`, enforced by `ssl_mode = ENCRYPTED_ONLY`). The backend service account has `roles/cloudsql.client` only — not admin.
 
 **5. Secret Management**
-Secrets (`app-api-key`, `db-password`) are stored in Secret Manager and injected as environment variable references at Cloud Run runtime. Plaintext values never appear in Terraform state or container config. Automatic 30-day rotation via Pub/Sub + Cloud Run Job. Service accounts have `roles/secretmanager.secretAccessor` scoped per-secret (not project-wide).
+Secrets (`app-api-key`, `db-password`) are stored in Secret Manager and injected as environment variable references at Cloud Run runtime, so they never appear in container config. Their initial values come from `TF_VAR_*` and **are** stored in Terraform state (`google_secret_manager_secret_version`, `google_sql_user`) — protect the state bucket accordingly. A 30-day rotation notification is wired to Pub/Sub + a Cloud Run Job; the handler is a placeholder and the push trigger needs rework before rotation actually happens (see `modules/workload/secret_rotation/README.md`). Service accounts have `roles/secretmanager.secretAccessor` scoped per-secret (not project-wide).
 
 **6. Audit Logging**
-All `cloudaudit.googleapis.com` logs are exported to a GCS bucket with a 365-day retention lifecycle rule. The audit log bucket has `force_destroy = false` to preserve logs even if the infrastructure is destroyed.
+All `cloudaudit.googleapis.com` logs are exported to a GCS bucket with a 365-day retention lifecycle rule. In `prod` the bucket has `force_destroy = false`, so logs survive a teardown (the destroy fails on the non-empty bucket instead of deleting them); `hml` uses `force_destroy = true` so it can be torn down routinely.
 
 ### IAM — Principle of Least Privilege
 
 | Service Account | Role | Scope |
 |---|---|---|
 | `backend-sa` | `roles/cloudsql.client` | Project |
-| `backend-sa` | `roles/storage.objectViewer` | Project |
+| `backend-sa` | `roles/storage.objectUser` | App storage bucket only (read-write GCS FUSE mount) |
 | `backend-sa` | `roles/secretmanager.secretAccessor` | `app-api-key` secret only |
 | `backend-sa` | `roles/secretmanager.secretAccessor` | `db-password` secret only |
-| `frontend-sa` | `roles/storage.objectViewer` | Project |
-| `rotation-invoker` | `roles/run.invoker` | Secret rotation Cloud Run Job only |
+| `frontend-sa` | — (no roles; runtime identity only) | — |
+| `<name>-rotation-invoker` | `roles/run.invoker` | Secret rotation Cloud Run Job only |
+| `tf-deployer-<env>` (CI) | curated list in `bootstrap/variables.tf` (`deployer_roles`) | Project + state bucket `objectAdmin` |
 
 ---
 

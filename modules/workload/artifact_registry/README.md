@@ -5,13 +5,16 @@ Artifact Registry repository for storing container images and packages.
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
 
-No requirements.
+| Name | Version |
+| ---- | ------- |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.7.0 |
+| <a name="requirement_google"></a> [google](#requirement\_google) | >= 5.0.0 |
 
 ## Providers
 
 | Name | Version |
-|------|---------|
-| <a name="provider_google"></a> [google](#provider\_google) | n/a |
+| ---- | ------- |
+| <a name="provider_google"></a> [google](#provider\_google) | >= 5.0.0 |
 
 ## Modules
 
@@ -20,13 +23,13 @@ No modules.
 ## Resources
 
 | Name | Type |
-|------|------|
+| ---- | ---- |
 | [google_artifact_registry_repository.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/artifact_registry_repository) | resource |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
+| ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_repository_id"></a> [repository\_id](#input\_repository\_id) | Artifact Registry repository ID | `string` | n/a | yes |
 | <a name="input_description"></a> [description](#input\_description) | Repository description | `string` | `"Managed by Terraform"` | no |
 | <a name="input_format"></a> [format](#input\_format) | Repository format. Determines what package types the repository stores. Valid values: DOCKER, MAVEN, NPM, PYTHON, APT, YUM, KFP, GO. | `string` | `"DOCKER"` | no |
@@ -36,8 +39,8 @@ No modules.
 ## Outputs
 
 | Name | Description |
-|------|-------------|
+| ---- | ----------- |
 | <a name="output_repository_id"></a> [repository\_id](#output\_repository\_id) | Repository ID |
 | <a name="output_repository_name"></a> [repository\_name](#output\_repository\_name) | Full repository name |
-| <a name="output_repository_url"></a> [repository\_url](#output\_repository\_url) | Repository URL |
+| <a name="output_repository_url"></a> [repository\_url](#output\_repository\_url) | Registry host path for pushing/pulling images (<location>-docker.pkg.dev/<project>/<repository\_id>). Only meaningful for format = DOCKER. |
 <!-- END_TF_DOCS -->

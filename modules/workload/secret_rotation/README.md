@@ -46,6 +46,17 @@ Pub/Sub topic  ──[push subscription]──▶  Cloud Run Job (handler)
 
 When the rotation handler generates a new secret version, **consumers of the secret are not automatically notified or restarted**. Cloud Run services that inject secrets as environment variables must be redeployed to pick up the new version. If using `version = "latest"`, the new value is available on the next cold start; warm instances continue using the old value until they are replaced.
 
+### Push to the Cloud Run Admin API is not authenticated correctly (known limitation)
+
+The push subscription targets the Cloud Run Admin API (`…/jobs/<name>:run`) with an
+**OIDC identity token**. Google APIs such as `run.googleapis.com` accept only OAuth
+2.0 access tokens, so the push is rejected (401) and the job is never started; the
+notification is retried until `message_retention_duration` expires. To make the loop
+functional, trigger the job through something that calls the Admin API with an
+access token — e.g. an Eventarc trigger → Cloud Workflows (`googleapis.run.v2.projects.locations.jobs.run`),
+or replace the job with a Cloud Run **service** that the push endpoint can call
+directly with OIDC.
+
 ### The handler image is a placeholder
 
 `handler_image` defaults to `gcr.io/cloudrun/hello`. This will receive rotation events but will not actually rotate any credentials. Replace this with your rotation handler image before enabling rotation on real secrets.
@@ -57,13 +68,16 @@ The `<name>-rotation-invoker` service account has `roles/run.invoker` on this sp
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
 
-No requirements.
+| Name | Version |
+| ---- | ------- |
+| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.7.0 |
+| <a name="requirement_google"></a> [google](#requirement\_google) | >= 5.0.0 |
 
 ## Providers
 
 | Name | Version |
-|------|---------|
-| <a name="provider_google"></a> [google](#provider\_google) | n/a |
+| ---- | ------- |
+| <a name="provider_google"></a> [google](#provider\_google) | >= 5.0.0 |
 
 ## Modules
 
@@ -72,7 +86,7 @@ No modules.
 ## Resources
 
 | Name | Type |
-|------|------|
+| ---- | ---- |
 | [google_cloud_run_v2_job.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/cloud_run_v2_job) | resource |
 | [google_cloud_run_v2_job_iam_member.invoker](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/cloud_run_v2_job_iam_member) | resource |
 | [google_pubsub_subscription.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_subscription) | resource |
@@ -84,7 +98,7 @@ No modules.
 ## Inputs
 
 | Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
+| ---- | ----------- | ---- | ------- | :------: |
 | <a name="input_name"></a> [name](#input\_name) | Name prefix for all resources in this module | `string` | n/a | yes |
 | <a name="input_project_id"></a> [project\_id](#input\_project\_id) | GCP Project ID | `string` | n/a | yes |
 | <a name="input_region"></a> [region](#input\_region) | Deployment region | `string` | n/a | yes |
@@ -95,8 +109,8 @@ No modules.
 ## Outputs
 
 | Name | Description |
-|------|-------------|
+| ---- | ----------- |
 | <a name="output_invoker_sa_email"></a> [invoker\_sa\_email](#output\_invoker\_sa\_email) | Email of the service account used to authenticate Pub/Sub push to the rotation handler job |
-| <a name="output_topic_id"></a> [topic\_id](#output\_topic\_id) | Full resource ID of the secret rotation Pub/Sub topic |
+| <a name="output_topic_id"></a> [topic\_id](#output\_topic\_id) | Full resource ID of the secret rotation Pub/Sub topic. Safe to use as a Secret Manager rotation topic: consumers of this output also wait for the publisher IAM binding. |
 | <a name="output_topic_name"></a> [topic\_name](#output\_topic\_name) | Name of the secret rotation Pub/Sub topic |
 <!-- END_TF_DOCS -->
