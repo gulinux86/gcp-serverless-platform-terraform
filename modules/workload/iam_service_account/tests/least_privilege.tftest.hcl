@@ -68,3 +68,31 @@ run "no_sa_iam_bindings_by_default" {
     error_message = "No service account IAM bindings must exist by default. Workload Identity or impersonation grants require explicit opt-in."
   }
 }
+
+run "no_workload_identity_binding_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(google_service_account_iam_member.workload_identity) == 0
+    error_message = "No Kubernetes service account may impersonate the SA unless it is listed explicitly."
+  }
+}
+
+run "workload_identity_binding_is_scoped_to_one_ksa" {
+  command = plan
+
+  variables {
+    workload_identity_pool = "test-project.svc.id.goog"
+    workload_identity_ksas = ["backend-hml/backend-hml"]
+  }
+
+  assert {
+    condition     = google_service_account_iam_member.workload_identity["backend-hml/backend-hml"].member == "serviceAccount:test-project.svc.id.goog[backend-hml/backend-hml]"
+    error_message = "The binding must name exactly one namespace/KSA pair, never the whole pool."
+  }
+
+  assert {
+    condition     = google_service_account_iam_member.workload_identity["backend-hml/backend-hml"].role == "roles/iam.workloadIdentityUser"
+    error_message = "Workload Identity is granted with roles/iam.workloadIdentityUser only."
+  }
+}

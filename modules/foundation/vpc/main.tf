@@ -4,18 +4,13 @@ resource "google_compute_network" "this" {
   routing_mode            = var.routing_mode
 }
 
-# Cloud Run reaches this VPC through Direct VPC Egress: each service attaches a
-# network_interface directly to the private subnet below. There is no Serverless
-# VPC Access Connector.
+# The GKE node subnet. VPC-native (alias IP): nodes take their address from the
+# primary range, pods and Services from the two secondary ranges below. Pods are
+# therefore first-class VPC addresses — Cloud SQL over PSA, NetworkPolicy and the
+# Gateway's container-native NEGs all see the pod IP, with no extra NAT hop.
 #
-# The connector was tried and abandoned — see ARCHITECTURE.md §"Cloud Run egress".
-# The cost of Direct VPC Egress is that Cloud Run holds per-instance IP
-# reservations in the subnet, and GCP releases them asynchronously (measured at
-# 1h+) after the services are deleted. That is handled by the serverless
-# IP-release gate in .github/workflows/terraform-destroy.yml plus the pipeline's
-# layer ordering: workload is always destroyed before foundation.
-# See docs/runbooks/serverless-ipv4-reservation.md
-
+# Sizing: a /16 pod range gives 256 nodes at the default 110 pods/node (/24 per
+# node). The Service range only has to hold ClusterIPs.
 resource "google_compute_subnetwork" "private" {
   name                     = "${var.name}-private"
   ip_cidr_range            = var.private_subnet_cidr
@@ -24,6 +19,16 @@ resource "google_compute_subnetwork" "private" {
   purpose                  = "PRIVATE"
   private_ip_google_access = true
 
+  secondary_ip_range {
+    range_name    = "${var.name}-pods"
+    ip_cidr_range = var.pods_cidr
+  }
+
+  secondary_ip_range {
+    range_name    = "${var.name}-services"
+    ip_cidr_range = var.services_cidr
+  }
+
   log_config {
     aggregation_interval = var.log_aggregation_interval
     flow_sampling        = var.log_flow_sampling
@@ -31,26 +36,9 @@ resource "google_compute_subnetwork" "private" {
   }
 
   # Destruction order:
-  # 1. This subnet is deleted (only possible once GCP has released the
-  #    purpose=SERVERLESS address Direct VPC Egress pinned here).
+  # 1. This subnet is deleted (only possible once the cluster, its nodes and any
+  #    NEGs the Gateway controller created are gone — see terraform-destroy.yml).
   # 2. decommissioning_buffer then waits before the PSA connection is removed.
-  depends_on = [time_sleep.decommissioning_buffer]
-}
-
-resource "google_compute_subnetwork" "private_2" {
-  name                     = "${var.name}-private-2"
-  ip_cidr_range            = var.secondary_subnet_cidr
-  region                   = var.region
-  network                  = google_compute_network.this.id
-  purpose                  = "PRIVATE"
-  private_ip_google_access = true
-
-  log_config {
-    aggregation_interval = var.log_aggregation_interval
-    flow_sampling        = var.log_flow_sampling
-    metadata             = "INCLUDE_ALL_METADATA"
-  }
-
   depends_on = [time_sleep.decommissioning_buffer]
 }
 

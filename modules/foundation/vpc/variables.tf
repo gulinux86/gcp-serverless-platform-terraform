@@ -4,7 +4,7 @@ variable "name" {
 }
 
 variable "region" {
-  description = "GCP region for subnet and PSA range creation. Must match the region of workload resources (Cloud Run, Cloud SQL) that connect to this network."
+  description = "GCP region for subnet and PSA range creation. Must match the region of the GKE cluster and Cloud SQL instance that connect to this network."
   type        = string
   default     = "us-central1"
 }
@@ -16,15 +16,21 @@ variable "routing_mode" {
 }
 
 variable "private_subnet_cidr" {
-  description = "Primary private subnet CIDR"
+  description = "Primary range of the node subnet. Each GKE node takes one address from here."
   type        = string
-  default     = "10.0.2.0/24"
+  default     = "10.0.0.0/22"
 }
 
-variable "secondary_subnet_cidr" {
-  description = "Secondary private subnet CIDR (must not overlap with primary or PSA range)"
+variable "pods_cidr" {
+  description = "Secondary range for pod IPs (VPC-native alias IPs). Must not overlap the primary range, the Service range or the PSA range."
   type        = string
-  default     = "10.0.3.0/24"
+  default     = "10.4.0.0/16"
+}
+
+variable "services_cidr" {
+  description = "Secondary range for Kubernetes Service ClusterIPs. Must not overlap the primary range, the pod range or the PSA range."
+  type        = string
+  default     = "10.8.0.0/20"
 }
 
 variable "log_aggregation_interval" {
@@ -38,4 +44,3 @@ variable "log_flow_sampling" {
   type        = number
   default     = 0.5
 }
-

@@ -9,9 +9,9 @@
 #
 #   This is a real trade-off: defaulting create_deny_rule to false means a
 #   misconfigured deployment has no explicit deny layer, relying on VPC ingress
-#   defaults. The counter-argument: Cloud Run with INGRESS_TRAFFIC_INTERNAL_ONLY
-#   and a private-only Cloud SQL already enforce the security perimeter at a
-#   higher layer than firewall rules.
+#   defaults. The counter-argument: private GKE nodes have no external IP, the
+#   only ingress path is the Gateway's load balancer (behind Cloud Armor), and
+#   Cloud SQL is private-only — the perimeter is enforced above firewall rules.
 
 mock_provider "google" {}
 
@@ -62,7 +62,7 @@ run "deny_rule_created_when_opted_in" {
 
   assert {
     condition     = google_compute_firewall.deny_external[0].direction == "INGRESS"
-    error_message = "Deny rule direction must be INGRESS. An EGRESS deny-all would block outbound Cloud Run traffic to Cloud SQL and Secret Manager."
+    error_message = "Deny rule direction must be INGRESS. An EGRESS deny-all would block node and pod traffic to Cloud SQL, Secret Manager and the control plane."
   }
 
   assert {

@@ -1,21 +1,20 @@
 name: terraform-plan
 
 # Plan as read-only feedback:
-#   - on PRs to develop/main (env inferred from the base branch), posted as a
-#     PR comment so you review the diff before deploying;
+#   - automatically on PRs to develop/main (env inferred from the base branch),
+#     posted as a PR comment so you review the diff before deploying;
 #   - on demand via workflow_dispatch, where you pick the environment.
-#
-# Credential-free checks (fmt + validate) ALWAYS run. The real plan needs GCP
-# auth (Workload Identity Federation); when WIF is not configured yet, the plan
-# is skipped with a clear message instead of failing the PR.
+# Deploys are separate and manual (see terraform-deploy.yml).
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
     branches: [develop, main]
     paths:
       - "**.tf"
       - "**.tfvars"
       - "**.hcl"
-      - ".github/workflows/terraform-plan.yml"
+      - "**.yml"
+      - "**.yaml"
   workflow_dispatch:
     inputs:
       environment:
@@ -34,7 +33,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Credential-free, and first. A plan impersonates a service account; code that
+  # does not parse or type-check would fail the plan anyway, having assumed an
+  # identity for nothing. Cheapest checks before the credentialed one.
+  validate:
+    uses: ./.github/workflows/_terraform-validate.yml
+    with:
+      layers: '["foundation", "workload"]'
+
   plan:
+    needs: validate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -44,36 +52,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-        with:
-          terraform_version: "~> 1.9"
-
-      # Credential-free gate — runs regardless of WIF being configured.
-      - name: Terraform fmt
-        run: terraform fmt -check -recursive
-
-      # Manual dispatch -> chosen environment; PR -> inferred from base branch.
-      # Also resolves env-specific auth/secrets and sets `configured` = whether a
-      # WIF provider secret exists for this environment.
+      # Manual dispatch -> chosen environment; PR -> inferred from base branch
+      # (main -> prod, develop -> hml). Also tells the later steps whether WIF is
+      # configured for that environment yet.
       - name: Select environment
         id: env
-        # Secrets reach the script as env vars, never interpolated into its text:
-        # a value containing quotes or $ can't break (or inject into) the shell.
         env:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_ENV: ${{ github.event.inputs.environment }}
           BASE_REF: ${{ github.base_ref }}
           PROD_WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
-          PROD_WIF_SA: ${{ secrets.PROD_WIF_SA }}
-          PROD_PROJECT_ID: ${{ secrets.PROD_PROJECT_ID }}
-          PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
-          PROD_API_SECRET_KEY: ${{ secrets.PROD_API_SECRET_KEY }}
           HML_WIF_PROVIDER: ${{ secrets.HML_WIF_PROVIDER }}
-          HML_WIF_SA: ${{ secrets.HML_WIF_SA }}
-          HML_PROJECT_ID: ${{ secrets.HML_PROJECT_ID }}
-          HML_DB_PASSWORD: ${{ secrets.HML_DB_PASSWORD }}
-          HML_API_SECRET_KEY: ${{ secrets.HML_API_SECRET_KEY }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             ENV="$INPUT_ENV"
@@ -83,100 +72,123 @@ jobs:
             ENV="hml"
           fi
           echo "ENV_NAME=$ENV" >> "$GITHUB_ENV"
-          if [ "$ENV" = "prod" ]; then P=PROD; else P=HML; fi
-          v() { local n="${P}_$1"; printf '%s' "${!n}"; }
-          WIF="$(v WIF_PROVIDER)"
-          {
-            echo "WIF_PROVIDER=$WIF"
-            echo "DEPLOYER_SA=$(v WIF_SA)"
-            # project_id is injected as a TF var (secret, masked in logs). The state
-            # bucket name is non-secret and lives in backend.hcl / workload tfvars.
-            echo "TF_VAR_project_id=$(v PROJECT_ID)"
-            echo "TF_VAR_db_password=$(v DB_PASSWORD)"
-            echo "TF_VAR_api_secret_key=$(v API_SECRET_KEY)"
-          } >> "$GITHUB_ENV"
+          if [ "$ENV" = "prod" ]; then WIF="$PROD_WIF_PROVIDER"; else WIF="$HML_WIF_PROVIDER"; fi
           if [ -n "$WIF" ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Authenticate to GCP (Workload Identity Federation)
+      # The PLAN service account — read-only. This job deliberately declares no
+      # `environment:`, so its OIDC token carries no environment claim and cannot
+      # impersonate the deployer: a pull request runs the workflow file from its
+      # own branch, and must not be able to mint that claim for itself.
+      - name: Authenticate to GCP and install Terraform
         if: steps.env.outputs.configured == 'true'
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        uses: ./.github/actions/gcp-terraform-setup
         with:
-          workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.DEPLOYER_SA }}
+          role: plan
+          terraform-version: "1.17.2"
+          workload-identity-provider: ${{ env.ENV_NAME == 'prod' && secrets.PROD_WIF_PROVIDER || secrets.HML_WIF_PROVIDER }}
+          plan-service-account: ${{ env.ENV_NAME == 'prod' && secrets.PROD_PLAN_SA || secrets.HML_PLAN_SA }}
 
-      - name: Setup gcloud
-        if: steps.env.outputs.configured == 'true'
-        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
-
-      - name: Terraform plan (or credential-free validate)
+      - name: Terraform plan
         id: plan
+        env:
+          LAYER: ${{ matrix.layer }}
+          CONFIGURED: ${{ steps.env.outputs.configured }}
+          # Secrets reach Terraform as env vars, never interpolated into the
+          # script text: a value containing quotes or $ cannot break the shell.
+          TF_VAR_project_id: ${{ env.ENV_NAME == 'prod' && secrets.PROD_PROJECT_ID || secrets.HML_PROJECT_ID }}
+          TF_VAR_db_password: ${{ env.ENV_NAME == 'prod' && secrets.PROD_DB_PASSWORD || secrets.HML_DB_PASSWORD }}
+          TF_VAR_api_secret_key: ${{ env.ENV_NAME == 'prod' && secrets.PROD_API_SECRET_KEY || secrets.HML_API_SECRET_KEY }}
         run: |
           set +e
-          LAYER="${{ matrix.layer }}"
 
-          # WIF not configured -> credential-free fmt+validate already cover syntax.
-          # Run validate (no backend) and skip the real plan with a clear message.
-          if [ "${{ steps.env.outputs.configured }}" != "true" ]; then
-            terraform -chdir="$LAYER" init -backend=false -input=false > /tmp/vo.txt 2>&1
-            terraform -chdir="$LAYER" validate >> /tmp/vo.txt 2>&1
-            RC=$?
+          # WIF not configured yet -> fmt + validate already ran credential-free
+          # in the `validate` job. Skip the real plan with a clear message instead
+          # of failing every pull request until bootstrap/ has been applied.
+          if [ "$CONFIGURED" != "true" ]; then
             {
               echo "Plan skipped — Workload Identity Federation is not configured for '${ENV_NAME}'."
-              echo "Set the ${ENV_NAME^^}_WIF_PROVIDER / ${ENV_NAME^^}_WIF_SA secrets (run bootstrap/) to enable real plans."
-              echo
-              echo "Credential-free checks (terraform validate, -backend=false):"
-              echo
-              cat /tmp/vo.txt
+              echo "Run bootstrap/ and set ${ENV_NAME^^}_WIF_PROVIDER / ${ENV_NAME^^}_PLAN_SA / ${ENV_NAME^^}_WIF_SA."
             } > /tmp/plan_output.txt
-            echo "status=skipped" >> "$GITHUB_OUTPUT"
-            echo "exitcode=$RC" >> "$GITHUB_OUTPUT"
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            echo "exitcode=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Configured: real init against the per-env backend (bucket + prefix in backend.hcl).
           if ! terraform -chdir="$LAYER" init -input=false \
               -backend-config="environments/${ENV_NAME}/backend.hcl" > /tmp/plan_output.txt 2>&1; then
-            echo "status=error" >> "$GITHUB_OUTPUT"
             echo "exitcode=1" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           # Greenfield/torn-down guard: the workload layer reads foundation's
-          # remote state. Skip the workload plan when foundation has no outputs
-          # for this env (never applied, or destroyed -> empty state).
+          # remote state. Skip the workload plan when foundation does not publish
+          # every output the workload reads — never applied, destroyed (the state
+          # object still exists but is empty), or left half-destroyed.
+          #
+          # Asks for the outputs actually consumed, not for a non-zero count: a
+          # destroy that fails partway leaves some outputs behind, a count passes,
+          # and the plan fails with a page of "Unsupported attribute" on a pull
+          # request that changed no Terraform at all. The list is derived from
+          # workload/ the same way scripts/check-layer-contract.sh derives it.
           if [ "$LAYER" = "workload" ]; then
             HCL="foundation/environments/${ENV_NAME}/backend.hcl"
             BUCKET=$(sed -nE 's/^[[:space:]]*bucket[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$HCL")
             PREFIX=$(sed -nE 's/^[[:space:]]*prefix[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$HCL")
-            FOUNDATION_OUTPUTS=$(gcloud storage cat "gs://${BUCKET}/$PREFIX/default.tfstate" 2>/dev/null | jq -r '.outputs | length' 2>/dev/null || echo 0)
-            if [ "${FOUNDATION_OUTPUTS:-0}" = "0" ]; then
+            STATE=$(gcloud storage cat "gs://${BUCKET}/${PREFIX}/default.tfstate" 2>/dev/null || echo '{}')
+
+            MISSING=""
+            while read -r NAME; do
+              printf '%s' "$STATE" | jq -e --arg n "$NAME" '.outputs[$n]' >/dev/null 2>&1 \
+                || MISSING="$MISSING $NAME"
+            done < <(grep -rhoE 'terraform_remote_state\.foundation\.outputs\.[a-zA-Z0-9_]+' \
+                       --include='*.tf' workload \
+                       | sed -E 's/.*\.outputs\.//' | sort -u)
+
+            if [ -n "$MISSING" ]; then
               {
-                echo "Skipped: foundation layer has no outputs for '${ENV_NAME}' yet."
-                echo "Apply the foundation layer first (terraform-deploy -> layer: foundation), then re-run."
+                echo "Skipped: the foundation layer does not currently publish everything"
+                echo "the workload layer reads for '${ENV_NAME}'."
+                echo
+                echo "Missing outputs:$MISSING"
+                echo
+                echo "Foundation is either not applied yet, destroyed, or left partly"
+                echo "destroyed by a failed run. Apply it (terraform-deploy -> layer:"
+                echo "foundation) and re-run, or finish the teardown so the state is empty."
               } > /tmp/plan_output.txt
-              echo "status=skipped" >> "$GITHUB_OUTPUT"
+              echo "skipped=true" >> "$GITHUB_OUTPUT"
               echo "exitcode=0" >> "$GITHUB_OUTPUT"
               exit 0
             fi
           fi
 
-          # Capture plan's own exit code: `$?` after an echo would always be 0
-          # and a failed plan would pass the "Fail on error" step.
-          if terraform -chdir="$LAYER" validate -no-color > /tmp/plan_output.txt 2>&1; then
-            terraform -chdir="$LAYER" plan -no-color -input=false \
-              -var-file="environments/${ENV_NAME}/terraform.tfvars" \
-              >> /tmp/plan_output.txt 2>&1
-            RC=$?
-          else
-            RC=1
+          # The plan SA is strictly read-only, which shapes both flags below.
+          #
+          # -lock=false: the GCS backend writes a .tflock object to lock. Plan
+          # mutates nothing, so concurrent plans are harmless — dropping the lock
+          # buys an identity with no write permission at all. Deploy keeps locking.
+          #
+          # -refresh=false (workload only): this layer manages Helm releases inside
+          # the cluster. Refreshing them means calling the Kubernetes API with
+          # cluster-level rights the plan SA deliberately does not have. Planning
+          # from stored state keeps it out of the cluster. Trade-off: drift in
+          # those releases (and in this layer's GCP resources) does not show here;
+          # the deploy path's own refresh catches it before anything is applied.
+          REFRESH_FLAG=""
+          if [ "$LAYER" = "workload" ]; then
+            REFRESH_FLAG="-refresh=false"
           fi
-          echo "status=plan" >> "$GITHUB_OUTPUT"
-          echo "exitcode=$RC" >> "$GITHUB_OUTPUT"
 
+          terraform -chdir="$LAYER" plan -no-color -input=false \
+            -lock=false ${REFRESH_FLAG} \
+            -var-file="environments/${ENV_NAME}/terraform.tfvars" \
+            > /tmp/plan_output.txt 2>&1
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+
+      # On PRs: post/update the plan as a comment.
       - name: Comment plan on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
@@ -185,16 +197,17 @@ jobs:
             const fs = require('fs');
             const layer = '${{ matrix.layer }}';
             const code = '${{ steps.plan.outputs.exitcode }}';
-            const status = '${{ steps.plan.outputs.status }}';
+            const skipped = '${{ steps.plan.outputs.skipped }}' === 'true';
             const tag = `<!-- tf-plan-bot-${layer} -->`;
             let plan = fs.readFileSync('/tmp/plan_output.txt', 'utf8');
             // exit 0 = no changes, 2 = changes (both fine), 1 = error.
-            const icon = status === 'skipped' ? '⏭️' : (code !== '1' ? '✅' : '❌');
+            const status = skipped ? '⏭️' : (code !== '1' ? '✅' : '❌');
             if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n... (truncated)';
-            const body = `${tag}\n## ${icon} Terraform Plan — \`${layer}\` (${process.env.ENV_NAME})\n\n<details><summary>Show output</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n\n</details>`;
+            const body = `${tag}\n## ${status} Terraform Plan — \`${layer}\` (${process.env.ENV_NAME})\n\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n\n</details>`;
 
             const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner, repo: context.repo.repo,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
               issue_number: context.issue.number,
             });
             const existing = comments.find(c => c.body.includes(tag));
@@ -210,13 +223,14 @@ jobs:
               });
             }
 
-      - name: Show output (dispatch)
+      # On manual dispatch: just surface the plan in the job log.
+      - name: Show plan (dispatch)
         if: github.event_name == 'workflow_dispatch'
         run: cat /tmp/plan_output.txt
 
-      - name: Fail on error
+      - name: Fail on plan error
         if: steps.plan.outputs.exitcode == '1'
         run: |
-          echo "terraform plan/validate failed:" >&2
+          echo "terraform plan failed:" >&2
           cat /tmp/plan_output.txt >&2
           exit 1

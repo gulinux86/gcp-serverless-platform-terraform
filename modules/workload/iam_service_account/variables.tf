@@ -43,3 +43,26 @@ variable "service_account_iam_roles" {
   type        = map(string)
   default     = {}
 }
+
+variable "workload_identity_ksas" {
+  description = "Kubernetes service accounts, as \"<namespace>/<name>\", allowed to impersonate this SA through GKE Workload Identity."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for k in var.workload_identity_ksas : can(regex("^[a-z0-9-]+/[a-z0-9-]+$", k))])
+    error_message = "Each entry must be \"<namespace>/<ksa-name>\"."
+  }
+}
+
+variable "workload_identity_pool" {
+  description = "Workload Identity pool (<project>.svc.id.goog). Required when workload_identity_ksas is set."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.workload_identity_pool == null || can(regex("\\.svc\\.id\\.goog$", var.workload_identity_pool))
+    error_message = "workload_identity_pool must look like <project>.svc.id.goog."
+  }
+}

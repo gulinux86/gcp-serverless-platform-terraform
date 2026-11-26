@@ -18,3 +18,8 @@ output "key_id" {
   value       = var.create_key ? google_service_account_key.this[0].id : null
 }
 
+
+output "workload_identity_annotation" {
+  description = "Annotation to put on the Kubernetes service account(s) bound to this SA"
+  value       = { "iam.gke.io/gcp-service-account" = google_service_account.this.email }
+}

@@ -33,9 +33,9 @@ database instance: googleapi: Error 400: Invalid request...
 
 Always pass `vpc_peering_id` (the foundation layer's `psa_connection_id` output) when using private connectivity.
 
-### Connecting from Cloud Run
+### Connecting from GKE
 
-Cloud Run services with Direct VPC Egress can reach the instance directly via its private IP. The connection string format is:
+Pods in the VPC-native cluster reach the instance over PSA, either through the Cloud SQL Auth Proxy sidecar (what the GitOps backend chart uses: IAM-authenticated, `instanceConnectionName` = the `connection_name` output, the pod's GSA needs `roles/cloudsql.client`) or directly on the private IP:
 
 ```
 postgresql://<db_user>@<private-ip>:5432/<database_name>?sslmode=require
@@ -43,7 +43,7 @@ postgresql://<db_user>@<private-ip>:5432/<database_name>?sslmode=require
 
 `sslmode=require` is mandatory with the default `ssl_mode = "ENCRYPTED_ONLY"`.
 
-Do not use the Cloud SQL Auth Proxy when Direct VPC Egress is in use — the proxy adds latency and an unnecessary sidecar; direct private IP is preferred.
+The proxy adds a sidecar but removes the need to distribute the server CA and lets IAM, not a network path alone, decide who connects.
 
 ### `deletion_protection`
 
@@ -62,9 +62,9 @@ Defaults to `true`. Set to `false` only for non-production environments. Terrafo
 
 | Name | Version |
 | ---- | ------- |
-| <a name="provider_google"></a> [google](#provider\_google) | 7.35.0 |
+| <a name="provider_google"></a> [google](#provider\_google) | >= 5.0.0 |
 | <a name="provider_terraform"></a> [terraform](#provider\_terraform) | n/a |
-| <a name="provider_time"></a> [time](#provider\_time) | 0.14.0 |
+| <a name="provider_time"></a> [time](#provider\_time) | >= 0.9.0 |
 
 ## Modules
 

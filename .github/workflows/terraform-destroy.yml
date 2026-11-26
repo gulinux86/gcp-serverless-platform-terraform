@@ -4,6 +4,9 @@ name: terraform-destroy
 # Destructive — gated by a typed confirmation and, for PROD, by the `prod` GitHub
 # Environment (required reviewer). Shares the `terraform-<env>` concurrency group
 # with terraform-deploy so a destroy can never overlap an apply for the same env.
+#
+# PROD also has deletion_protection on the GKE cluster, so a prod destroy stops at
+# the cluster until that flag is turned off in a reviewed change.
 on:
   workflow_dispatch:
     inputs:
@@ -15,7 +18,7 @@ on:
       layer:
         description: "Which layer(s) to destroy"
         required: true
-        default: workload
+        default: both
         type: choice
         options: [foundation, workload, both]
       confirm:
@@ -31,149 +34,329 @@ jobs:
   destroy:
     runs-on: ubuntu-latest
     # Ties to the GitHub Environment: `prod` carries the required reviewer, so a
-    # prod run pauses for approval before this job starts.
+    # prod run pauses for approval before this job starts. It also mints the
+    # `environment` claim the deployer SA requires.
     environment: ${{ github.event.inputs.environment }}
     concurrency:
       group: terraform-${{ github.event.inputs.environment }}
       cancel-in-progress: false
     env:
       ENVIRONMENT: ${{ github.event.inputs.environment }}
+      LAYER_INPUT: ${{ github.event.inputs.layer }}
+      CONFIRM: ${{ github.event.inputs.confirm }}
+      TF_VAR_project_id: ${{ github.event.inputs.environment == 'prod' && secrets.PROD_PROJECT_ID || secrets.HML_PROJECT_ID }}
+      TF_VAR_db_password: ${{ github.event.inputs.environment == 'prod' && secrets.PROD_DB_PASSWORD || secrets.HML_DB_PASSWORD }}
+      TF_VAR_api_secret_key: ${{ github.event.inputs.environment == 'prod' && secrets.PROD_API_SECRET_KEY || secrets.HML_API_SECRET_KEY }}
     steps:
       - name: Confirm destroy
         run: |
-          if [ "${{ github.event.inputs.confirm }}" != "$ENVIRONMENT" ]; then
-            echo "Confirmation '${{ github.event.inputs.confirm }}' does not match environment '$ENVIRONMENT'. Aborting." >&2
+          if [ "$CONFIRM" != "$ENVIRONMENT" ]; then
+            echo "Confirmation '$CONFIRM' does not match environment '$ENVIRONMENT'. Aborting." >&2
             exit 1
           fi
 
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Select environment auth
-        # Secrets reach the script as env vars, never interpolated into its text:
-        # a value containing quotes or $ can't break (or inject into) the shell.
-        env:
-          PROD_WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
-          PROD_WIF_SA: ${{ secrets.PROD_WIF_SA }}
-          PROD_PROJECT_ID: ${{ secrets.PROD_PROJECT_ID }}
-          PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
-          PROD_API_SECRET_KEY: ${{ secrets.PROD_API_SECRET_KEY }}
-          HML_WIF_PROVIDER: ${{ secrets.HML_WIF_PROVIDER }}
-          HML_WIF_SA: ${{ secrets.HML_WIF_SA }}
-          HML_PROJECT_ID: ${{ secrets.HML_PROJECT_ID }}
-          HML_DB_PASSWORD: ${{ secrets.HML_DB_PASSWORD }}
-          HML_API_SECRET_KEY: ${{ secrets.HML_API_SECRET_KEY }}
-        run: |
-          if [ "$ENVIRONMENT" = "prod" ]; then P=PROD; else P=HML; fi
-          v() { local n="${P}_$1"; printf '%s' "${!n}"; }
-          {
-            echo "WIF_PROVIDER=$(v WIF_PROVIDER)"
-            echo "DEPLOYER_SA=$(v WIF_SA)"
-            # project_id via secret (masked). State bucket name is non-secret (backend.hcl).
-            echo "TF_VAR_project_id=$(v PROJECT_ID)"
-            echo "TF_VAR_db_password=$(v DB_PASSWORD)"
-            echo "TF_VAR_api_secret_key=$(v API_SECRET_KEY)"
-          } >> "$GITHUB_ENV"
-
-      - name: Authenticate to GCP (Workload Identity Federation)
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+      # Same action and identity as terraform-deploy, plus kubectl for the drain.
+      - name: Authenticate to GCP and install Terraform
+        uses: ./.github/actions/gcp-terraform-setup
         with:
-          workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.DEPLOYER_SA }}
-
-      # Needed by the serverless IP-release gate in the Destroy step.
-      - name: Setup gcloud
-        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2.2.1
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-        with:
-          terraform_version: "~> 1.9"
+          role: deploy
+          terraform-version: "1.17.2"
+          install-kubectl: "true"
+          workload-identity-provider: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_WIF_PROVIDER || secrets.HML_WIF_PROVIDER }}
+          deploy-service-account: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_WIF_SA || secrets.HML_WIF_SA }}
 
       - name: Resolve layers
         run: |
-          # "both" must destroy workload BEFORE foundation (reverse of apply):
-          # workload depends on foundation's state and on live network resources.
-          if [ "${{ github.event.inputs.layer }}" = "both" ]; then
+          # LAYERS gates which steps run; the workload-before-foundation ordering is
+          # the order of the steps themselves, not the order of this string.
+          if [ "$LAYER_INPUT" = "both" ]; then
             echo "LAYERS=workload foundation" >> "$GITHUB_ENV"
           else
-            echo "LAYERS=${{ github.event.inputs.layer }}" >> "$GITHUB_ENV"
+            echo "LAYERS=$LAYER_INPUT" >> "$GITHUB_ENV"
           fi
 
-      - name: Destroy
+      # What the cluster owns that Terraform does not.
+      #
+      # The edge load balancer is built by the GKE Gateway controller from a
+      # Gateway in Git. It never enters Terraform state, yet it holds the static
+      # IP the workload layer owns (so `terraform destroy workload` fails on an
+      # address "in use") and its NEGs live in the node subnet (so the foundation
+      # destroy fails on the subnet). The controller removes all of it when the
+      # Gateway is deleted — but only while the cluster is alive.
+      #
+      # So, while it is alive:
+      #   1. Freeze Argo CD automation. selfHeal restores whatever is deleted.
+      #   2. Delete ApplicationSets, then Applications. Cascading deletion removes
+      #      the Gateway, Services and Ingresses they own.
+      #   3. Strip finalizers from anything stuck, so the Argo CD Helm uninstall in
+      #      `terraform destroy workload` does not hang on them.
+      #   4. Delete any Gateway / Ingress / LoadBalancer Service left behind, and
+      #      wait until no forwarding rule holds the static IP.
+      - name: Drain cluster-owned state
+        if: contains(env.LAYERS, 'workload')
+        run: |
+          set -uo pipefail
+          terraform -chdir=foundation init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl" >/dev/null 2>&1 || true
+          CLUSTER=$(terraform -chdir=foundation output -raw cluster_name 2>/dev/null || true)
+          LOCATION=$(terraform -chdir=foundation output -raw cluster_location 2>/dev/null || true)
+
+          # `terraform output -raw` prints "Warning: No outputs found" and exits 0
+          # when the state has none, so anything that is not a plausible name is
+          # treated as no name rather than passed to gcloud as an identifier.
+          case "$CLUSTER" in ""|*[!a-z0-9-]*) CLUSTER="" ;; esac
+          case "$LOCATION" in ""|*[!a-z0-9-]*) LOCATION="" ;; esac
+
+          if [ -z "$CLUSTER" ] || [ -z "$LOCATION" ] || \
+             ! gcloud container clusters describe "$CLUSTER" --location "$LOCATION" >/dev/null 2>&1; then
+            echo "no live cluster for '$ENVIRONMENT'; nothing to drain"
+            exit 0
+          fi
+
+          # The DNS endpoint: the IP endpoint is internal and the runner is not.
+          gcloud container clusters get-credentials "$CLUSTER" --location "$LOCATION" --dns-endpoint
+
+          # Freeze first, delete second.
+          #
+          # Clearing syncPolicy.automated is the correct instrument — NOT scaling
+          # argocd-application-controller to zero: the same controller processes
+          # finalizers, so a deletion afterwards would hang forever.
+          #
+          # Parents first. `root` manages other Applications with selfHeal, so a
+          # child frozen while its parent is still automated is put back from Git.
+          echo "::group::freezing Argo CD automation"
+          for TRY in 1 2 3 4 5; do
+            AUTOMATED=$(kubectl get applications -n argocd -o json 2>/dev/null | jq -r '.items
+              | map(select(.spec.syncPolicy.automated != null))
+              | sort_by(any(.status.resources[]?; .kind == "Application" or .kind == "ApplicationSet") | not)
+              | .[].metadata.name')
+            [ -z "$AUTOMATED" ] && { echo "  no Application left automated"; break; }
+            [ "$TRY" = 5 ] && { echo "::warning::still automated after 5 passes: $AUTOMATED"; break; }
+            while read -r APP; do
+              kubectl patch application "$APP" -n argocd --type merge \
+                -p '{"spec":{"syncPolicy":{"automated":null}}}' || true
+            done <<<"$AUTOMATED"
+            sleep 10
+          done
+          echo "::endgroup::"
+
+          # An ApplicationSet regenerates every Application it owns, so it goes
+          # before them; its generated Applications are deleted with it.
+          if kubectl get crd applicationsets.argoproj.io >/dev/null 2>&1; then
+            echo "::group::deleting ApplicationSets"
+            kubectl delete applicationsets --all -n argocd --timeout=5m || true
+            echo "::endgroup::"
+          fi
+
+          echo "::group::deleting Argo CD Applications"
+          kubectl delete applications --all -n argocd --timeout=5m || true
+          echo "::endgroup::"
+
+          REMAINING=$(kubectl get applications -n argocd -o name 2>/dev/null || true)
+          if [ -n "$REMAINING" ]; then
+            echo "::group::stripping finalizers from Applications that did not go"
+            for APP in $REMAINING; do
+              echo "  $APP"
+              kubectl patch "$APP" -n argocd --type merge \
+                -p '{"metadata":{"finalizers":null}}' || true
+            done
+            kubectl delete applications --all -n argocd --timeout=2m || true
+            echo "::endgroup::"
+          fi
+
+          # Stripping a finalizer deletes the Application without its resources.
+          # Whatever builds a load balancer is deleted here directly, while the
+          # controllers that tear the load balancers down are still running.
+          echo "::group::deleting load-balancer owners left behind"
+          if kubectl get crd gateways.gateway.networking.k8s.io >/dev/null 2>&1; then
+            kubectl delete gateways.gateway.networking.k8s.io --all -A --timeout=10m || true
+          fi
+          kubectl delete ingress --all -A --timeout=10m || true
+          kubectl get svc -A -o json \
+            | jq -r '.items[] | select(.spec.type == "LoadBalancer") | "\(.metadata.namespace) \(.metadata.name)"' \
+            | while read -r NS NAME; do
+                kubectl delete svc "$NAME" -n "$NS" --timeout=5m || true
+              done
+          echo "::endgroup::"
+
+          # The Gateway controller deletes the load balancer asynchronously. Wait
+          # for the forwarding rule on our static IP to go, rather than letting
+          # `terraform destroy workload` find the address still in use.
+          terraform -chdir=workload init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl" >/dev/null 2>&1 || true
+          IP=$(terraform -chdir=workload show -json 2>/dev/null \
+               | jq -r '[.. | objects | select(.type? == "google_compute_global_address" and .name? == "gateway") | .values.address] | first // empty' 2>/dev/null)
+          if [ -z "$IP" ]; then
+            echo "no gateway address in workload state; nothing to wait for"
+            exit 0
+          fi
+
+          echo "::group::waiting for the Gateway load balancer to release $IP"
+          for i in $(seq 1 40); do
+            RULES=$(gcloud compute forwarding-rules list --global \
+                    --filter="IPAddress=$IP" --format="value(name)") || {
+              echo "  could not list forwarding rules; aborting rather than guessing" >&2
+              exit 1
+            }
+            [ -z "$RULES" ] && { echo "  released"; break; }
+            if [ "$i" = 40 ]; then
+              echo "::error::forwarding rule(s) still hold $IP after 20 minutes: $RULES"
+              echo "Delete the Gateway that owns them (or the rules themselves) and re-run." >&2
+              exit 1
+            fi
+            echo "  still held by: $RULES"
+            sleep 30
+          done
+          echo "::endgroup::"
+
+      # Destroyed before foundation: this layer depends on foundation's state and
+      # on a live cluster endpoint (Argo CD is uninstalled through it).
+      - name: Destroy workload
+        if: contains(env.LAYERS, 'workload')
         run: |
           set -euo pipefail
+          terraform -chdir=workload init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl"
+          terraform -chdir=workload destroy -auto-approve -input=false \
+            -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
 
-          REGION=$(sed -nE 's/^[[:space:]]*region[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' \
-            "foundation/environments/${ENVIRONMENT}/terraform.tfvars")
-          REGION="${REGION:-us-central1}"
+      # Fail here, in seconds, rather than inside `terraform destroy` twenty minutes
+      # later as an opaque "resource is already being used by".
+      #
+      # Placed BETWEEN the two layers: by now the only load balancer that can be
+      # left is one nothing is going to remove. GKE names what it creates —
+      # gkegw1-* for Gateways, k8s1-*/k8s2-* for Ingress and NEG-backed Services —
+      # so those prefixes are what is checked.
+      - name: Preflight — no GKE-built load balancer is left
+        if: contains(env.LAYERS, 'foundation')
+        run: |
+          set -uo pipefail
+          FAIL=0
+          FILTER='name ~ ^(gkegw1-|k8s1-|k8s2-)'
 
-          # Serverless IP-release gate.
-          #
-          # Cloud Run's Direct VPC Egress leaves behind a compute address with
-          # purpose=SERVERLESS, held by serverless.googleapis.com through an
-          # addressReservation. That reservation has no user, has no public API,
-          # and CANNOT be deleted — `gcloud compute addresses delete` is rejected
-          # while it exists. It blocks deletion of the private subnet, failing the
-          # foundation destroy with:
-          #
-          #   The subnetwork resource '...' is already being used by
-          #   'projects/.../addresses/serverless-ipv4-...'
-          #
-          # Google releases it asynchronously with no documented upper bound, so
-          # the only correct behaviour is to wait and report progress rather than
-          # guess with a fixed sleep.
-          #
-          # Timeout sizing, from one measured teardown (2026-08-11):
-          #   reservation created 19:42Z, released 21:49Z — 2h07 total, and at
-          #   least 1h20 after the last Cloud Run service was deleted.
-          # A 30- and then a 60-minute timeout were both tried and both would have
-          # failed a perfectly healthy teardown. 120 minutes leaves margin over the
-          # only sample available; there is no published SLA to size against.
-          #
-          # Nothing is billed while waiting — the leftover foundation resources
-          # (VPC, subnet, PSA range, peering) are free, so a long wait or a re-run
-          # tomorrow costs nothing.
-          # Runbook: docs/runbooks/serverless-ipv4-reservation.md
-          wait_for_serverless_release() {
-            local deadline=$(( SECONDS + 7200 )) # 120 min
-            local left
-            while :; do
-              left=$(gcloud compute addresses list \
-                --regions="$REGION" --filter="purpose=SERVERLESS" \
-                --format="value(name)" | wc -l)
+          BES=$(gcloud compute backend-services list --filter="$FILTER" --format="value(name)") || FAIL=1
+          UMS=$(gcloud compute url-maps list --filter="$FILTER" --format="value(name)") || FAIL=1
+          if [ -n "$BES$UMS" ]; then
+            echo "  BLOCKING load-balancer components GKE created and did not remove:" >&2
+            for X in $UMS $BES; do echo "    $X"; done >&2
+            FAIL=1
+          fi
 
-              if [ "$left" -eq 0 ]; then
-                echo "No serverless IP reservations left in ${REGION}."
-                return 0
-              fi
+          if [ "$FAIL" = "1" ]; then
+            echo >&2
+            echo "Their NEGs would hold the node subnet and fail the foundation destroy." >&2
+            echo "If you selected layer=foundation while the workload layer is still" >&2
+            echo "deployed, run with layer=both so the cluster is drained first." >&2
+            exit 1
+          fi
+          echo "  clean"
 
-              if [ "$SECONDS" -ge "$deadline" ]; then
-                echo "::error::${left} serverless IP reservation(s) still held in ${REGION} after 120 minutes."
-                gcloud compute addresses list --regions="$REGION" --filter="purpose=SERVERLESS"
-                echo "These are released by Google and cannot be deleted manually."
-                echo "Re-run this workflow with layer: foundation once they are gone."
-                return 1
-              fi
+      # Destroyed in passes, with a sweep between them — the GKE counterpart of the
+      # node-group → ENI sweep in eks-terraform.
+      #
+      # GKE removes its nodes and the firewall rules it created for the cluster
+      # when the cluster is deleted. It does NOT remove the NEGs its controllers
+      # created; a NEG left in the node subnet blocks the subnet, and a stray
+      # GKE firewall rule blocks the network. Both can only be swept once the
+      # cluster is gone, so the cluster is destroyed first, on its own.
+      #
+      # `-target` is used deliberately: teardown ordering is the one thing it
+      # expresses well.
+      - name: Destroy foundation
+        if: contains(env.LAYERS, 'foundation')
+        run: |
+          set -euo pipefail
+          terraform -chdir=foundation init -input=false \
+            -backend-config="environments/${ENVIRONMENT}/backend.hcl"
 
-              echo "Waiting for ${left} serverless IP reservation(s) in ${REGION} — $(( SECONDS / 60 ))m elapsed."
-              sleep 60
+          # Read from the state, not from the outputs: after a -target run the
+          # outputs "may not be fully updated", and a recovery run is exactly the
+          # one that needs the sweep. The resource is the fact; the output is a
+          # projection of it.
+          STATE_JSON=$(terraform -chdir=foundation show -json 2>/dev/null || echo '{}')
+          VPC=$(printf '%s' "$STATE_JSON" \
+                | jq -r '[.. | objects | select(.type? == "google_compute_network") | .values.name] | first // empty')
+          TF_FIREWALLS=$(printf '%s' "$STATE_JSON" \
+                | jq -r '[.. | objects | select(.type? == "google_compute_firewall") | .values.name] | .[]')
+          echo "vpc from state: ${VPC:-none}"
+
+          echo "::group::terraform destroy — node pool and cluster first"
+          terraform -chdir=foundation destroy -auto-approve -input=false \
+            -target=module.node_pool -target=module.gke \
+            -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
+          echo "::endgroup::"
+
+          if [ -z "$VPC" ]; then
+            echo "no VPC in state; nothing to sweep"
+          else
+            # NEGs in this VPC. Nothing else in this repository creates one, so
+            # any NEG here belongs to the cluster that was just deleted.
+            echo "::group::sweeping NEGs GKE left in $VPC"
+            for _ in $(seq 1 6); do
+              NEGS=$(gcloud compute network-endpoint-groups list \
+                     --filter="network ~ /networks/${VPC}\$" \
+                     --format="csv[no-heading](name,zone.basename())") || {
+                echo "  could not list NEGs in $VPC" >&2
+                exit 1
+              }
+              [ -z "$NEGS" ] && { echo "  none left"; break; }
+              while IFS=, read -r NEG ZONE; do
+                echo "  deleting $NEG ($ZONE)"
+                # Not fatal on its own: a NEG that refuses to go is reported by
+                # the subnet delete, with the dependency named.
+                gcloud compute network-endpoint-groups delete "$NEG" --zone "$ZONE" --quiet || true
+              done <<<"$NEGS"
+              sleep 10
             done
-          }
-
-          for L in $LAYERS; do
-            # Gate only guards the foundation: it owns the subnet the reservation
-            # pins. Destroying workload alone is unaffected.
-            if [ "$L" = "foundation" ]; then
-              echo "::group::wait for serverless IP release ($REGION)"
-              wait_for_serverless_release
-              echo "::endgroup::"
-            fi
-
-            echo "::group::terraform destroy $L ($ENVIRONMENT)"
-            terraform -chdir="$L" init -input=false \
-              -backend-config="environments/${ENVIRONMENT}/backend.hcl"
-            terraform -chdir="$L" destroy -auto-approve -input=false \
-              -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
             echo "::endgroup::"
-          done
+
+            # Firewall rules GKE created and did not remove, by GKE's own name
+            # prefixes, and never one Terraform owns.
+            echo "::group::sweeping GKE firewall rules left in $VPC"
+            RULES=$(gcloud compute firewall-rules list \
+                    --filter="network ~ /networks/${VPC}\$" --format="value(name)") || {
+              echo "  could not list firewall rules in $VPC" >&2
+              exit 1
+            }
+            SWEPT=0
+            for RULE in $RULES; do
+              if printf '%s\n' "$TF_FIREWALLS" | grep -qx "$RULE"; then
+                continue
+              fi
+              case "$RULE" in
+                gke-*|k8s-*|k8s2-*|gkegw1-*)
+                  echo "  deleting $RULE"
+                  gcloud compute firewall-rules delete "$RULE" --quiet || true
+                  SWEPT=1
+                  ;;
+                *) echo "  leaving $RULE (not created by GKE, not in state)" ;;
+              esac
+            done
+            [ "$SWEPT" = 0 ] && echo "  none left behind"
+            echo "::endgroup::"
+          fi
+
+          echo "::group::terraform destroy — the rest of foundation"
+          terraform -chdir=foundation destroy -auto-approve -input=false \
+            -var-file="environments/${ENVIRONMENT}/terraform.tfvars"
+          echo "::endgroup::"
+
+      # Persistent disks a PVC provisioned outlive the cluster when the
+      # StorageClass reclaim policy is Retain, and keep billing. They hold no
+      # network resource, so they do not block the destroy — reported, not deleted:
+      # in prod they may be the only copy of the data.
+      - name: Report orphaned persistent disks
+        if: always() && contains(env.LAYERS, 'foundation')
+        run: |
+          DISKS=$(gcloud compute disks list \
+                  --filter='description ~ "kubernetes.io/created-for/pvc/name" AND -users:*' \
+                  --format="table(name,zone.basename(),sizeGb)" 2>/dev/null || true)
+          if [ -n "$DISKS" ]; then
+            echo "::warning::unattached PVC disks remain (still billed):"
+            echo "$DISKS"
+          else
+            echo "no orphaned PVC disks"
+          fi

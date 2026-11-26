@@ -8,12 +8,17 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = ">= 5.0.0"
+      version = ">= 6.14.0"
     }
     # Used transitively by the cloud_sql module (time_sleep).
     time = {
       source  = "hashicorp/time"
       version = ">= 0.9.0"
+    }
+    # Argo CD and its bootstrap chart. 2.x for the `set {}` block syntax.
+    helm = {
+      source  = "hashicorp/helm"
+      version = "~> 2.17"
     }
   }
 }

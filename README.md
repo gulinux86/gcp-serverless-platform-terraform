@@ -1,20 +1,22 @@
-# GCP Serverless Platform — Terraform
+# GCP Platform — Private GKE + Argo CD (Terraform)
 
-Production-grade serverless infrastructure on Google Cloud Platform. Two-tier web application (frontend + backend API + managed PostgreSQL) provisioned with Terraform, using Cloud Run v2 with Direct VPC Egress, path-based Global Load Balancing, and Cloud Armor WAF. Two independent Terraform layers, per-environment state (`hml`/`prod`), and a full GitHub Actions delivery pipeline with keyless (WIF) auth.
+Two-tier web application (frontend + backend API + managed PostgreSQL) on **GKE Standard**: a private, VPC-native cluster with Workload Identity and Dataplane V2, bootstrapped with **Argo CD** so every Kubernetes workload is delivered by GitOps. Terraform provisions the platform; Argo CD delivers what runs on it. Two independent Terraform layers, per-environment state (`hml`/`prod`), and a GitHub Actions pipeline with keyless (WIF) auth and a read-only plan identity — ported from [`eks-terraform`](../eks-terraform).
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system diagram and component reference.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full diagram, the Terraform/GitOps boundary, and the teardown design.
+
+> **History.** This repository started as a Cloud Run platform (Cloud Run v2 + Direct VPC Egress + Terraform-managed URL map). The Cloud Run services, the serverless LB, the Pub/Sub + Cloud Run Job secret rotation, and the serverless IP-release gate are gone. The posts under `docs/blog-*` describe that earlier design.
 
 ---
 
 ## Prerequisites
 
-| Tool | Minimum Version | Notes |
+| Tool | Version | Notes |
 |---|---|---|
-| Terraform | >= 1.7.0 | `terraform -version` (module tests use `mock_provider`) |
-| gcloud CLI | any recent | `gcloud version` |
-| Google Terraform provider | >= 5.0.0 | declared in each layer's `version.tf` |
+| Terraform | 1.17.2 in CI (`>= 1.7.0` in code) | module tests use `mock_provider` |
+| gcloud CLI + `gke-gcloud-auth-plugin` | recent | `gcloud components install gke-gcloud-auth-plugin kubectl` |
+| Google provider | `>= 6.14.0` (locked at 7.x) | DNS-based control-plane endpoint |
+| Helm provider | `~> 2.17` | `set {}` block syntax |
 
-**Authentication:**
 ```bash
 gcloud auth application-default login
 gcloud config set project <project-id>
@@ -26,123 +28,100 @@ gcloud config set project <project-id>
 
 ```
 .
-├── .github/workflows/          # CI/CD: test, security-scan, plan, deploy, destroy
-│
-├── bootstrap/                  # One-time: Workload Identity Federation + deployer SA
-│   ├── main.tf                 # WIF pool/provider, deployer SA, IAM (per env)
-│   └── environments/{hml,prod}/terraform.tfvars
-│
-├── foundation/                 # Layer 1 (independent root): core networking
-│   ├── main.tf                 # VPC, subnets, PSA, firewall
-│   ├── provider.tf             # google provider (per layer)
-│   ├── state_bucket.tf         # Documents state bucket (not managed by Terraform)
-│   ├── version.tf              # Partial GCS backend + provider constraints
-│   ├── variables.tf · outputs.tf
-│   └── environments/{hml,prod}/{backend.hcl,terraform.tfvars}
-│
-├── workload/                   # Layer 2 (independent root): compute, data, app
-│   ├── main.tf                 # Cloud Run, LB, SQL, secrets, IAM, monitoring
-│   ├── remote_state.tf         # Reads foundation's remote state
-│   ├── provider.tf · version.tf · variables.tf · outputs.tf
-│   └── environments/{hml,prod}/{backend.hcl,terraform.tfvars}
-│
-├── docs/STATE_MIGRATION.md     # Single-root → two-layer migration runbook
-│
+├── .github/
+│   ├── actions/gcp-terraform-setup/  # WIF auth (plan|deploy identity) + Terraform (+ kubectl)
+│   └── workflows/                    # plan, deploy, destroy, test, security-scan, lint, docs
+│                                     # + reusable _terraform-test/_terraform-validate/_security-scan
+├── bootstrap/                  # One-time, owner-run: APIs, WIF pool, plan SA (RO) + deployer SA
+├── foundation/                 # Layer 1: VPC-native network, NAT, private GKE cluster, node pool
+├── workload/                   # Layer 2: Cloud SQL, secrets, WI identities, edge (IP/WAF/cert), Argo CD
+├── scripts/check-layer-contract.sh  # foundation outputs ⇄ workload references, credential-free
 └── modules/
     ├── foundation/
-    │   ├── vpc/                # VPC, subnets, PSA range + peering, flow logs
-    │   └── cloud_firewall/     # Firewall rules
+    │   ├── vpc/                # VPC, node subnet + pod/service secondary ranges, PSA peering
+    │   ├── cloud_firewall/     # Internal firewall rules
+    │   ├── cloud_nat/          # Router + NAT scoped to the node subnet
+    │   ├── gke_cluster/        # Private GKE Standard (DNS endpoint, WI, Dataplane V2, Gateway API)
+    │   └── gke_node_pool/      # Hardened node pool (dedicated SA, GKE_METADATA, shielded, surge)
     └── workload/
-        ├── cloud_run_service/  # Cloud Run v2 service + Direct VPC Egress
-        ├── cloud_sql/          # PostgreSQL private instance
-        ├── cloud_storage/      # GCS bucket
-        ├── https_load_balancer/# Global LB + path routing + Cloud Armor attachment
-        ├── cloud_armor/        # WAF security policy
-        ├── iam_service_account/# Service account + role bindings
-        ├── artifact_registry/  # Docker image repository
-        ├── secret_manager/     # Secret + rotation config
-        ├── secret_rotation/    # Pub/Sub + Cloud Run Job rotation handler
-        └── pubsub/             # Pub/Sub topic primitive
+        ├── argocd/             # Argo CD Helm release (bare: CRDs + controllers)
+        ├── argocd_bootstrap/   # AppProjects + root Application (local Helm chart)
+        ├── iam_service_account/# SA + role bindings + Workload Identity bindings
+        ├── cloud_sql/          # PostgreSQL, private IP only
+        ├── cloud_armor/        # WAF policy (attached from Git via GCPBackendPolicy)
+        ├── secret_manager/ · cloud_storage/ · artifact_registry/
 ```
+
+The Kubernetes side lives in the GitOps repository **[`gke-gitops-platform-apps`](../gke-gitops-platform-apps)**: platform add-ons (External Secrets, cert-manager, kube-prometheus-stack), the Gateway/HTTPRoute/GCPBackendPolicy, and the frontend/backend Helm charts.
 
 ---
 
-## Architecture
-
-### Two-Layer Design
-
-The infrastructure is split into two **independent Terraform root modules** — there is no root orchestrator. The dependency contract is enforced by remote state + the CI pipelines, not by a parent module:
+## Architecture in one screen
 
 ```
-foundation/  ── apply ──▶  GCS state (gs://<bucket>/<env>/foundation/)
-                                 │
-workload/    ── reads ───────────┘   data.terraform_remote_state.foundation
-             ── apply ──▶  GCS state (gs://<bucket>/<env>/workload/)
+foundation/  ── apply ──▶ gs://serverless-<env>/<env>/foundation
+  VPC (nodes /22, pods /16, services /20) · Cloud NAT · PSA
+  GKE Standard: private nodes + private IP endpoint + IAM-authorised DNS endpoint
+  node pool (dedicated SA, Workload Identity metadata)
+                                │ terraform_remote_state
+workload/    ── apply ──▶ gs://serverless-<env>/<env>/workload
+  Cloud SQL (PSA) · Secret Manager · Artifact Registry · GCS · audit sink · alerts
+  GSAs ⇄ KSAs (Workload Identity) · static IP + Cloud Armor + managed cert
+  Argo CD ──▶ AppProjects + root Application ──▶ gke-gitops-platform-apps
 ```
-
-**Foundation** owns the network (VPC, subnets, PSA, firewall). It must be applied before workload and destroyed after it.
-
-**Workload** owns compute and data. It reads foundation's outputs (`vpc_network_id`, `private_subnet_id`, `psa_connection_id`) from remote state via `workload/remote_state.tf` — so it cannot plan until foundation is applied. The `terraform-deploy`/`terraform-destroy` pipelines enforce the apply/destroy ordering; `terraform-plan` skips the workload plan with a clear message when foundation has no outputs yet.
-
-Each layer is applied per environment by selecting a backend config:
-`terraform -chdir=<layer> init -backend-config=environments/<env>/backend.hcl`.
-
-### Key Design Decisions
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Compute | Cloud Run v2 (not GKE) | No cluster management, scale-to-zero, per-request billing |
-| VPC connectivity | Direct VPC Egress (not a Serverless VPC Access Connector) | No connector fleet to keep healthy, no idle cost; the subnet's `purpose=SERVERLESS` address reservation is waited out by the destroy pipeline's IP-release gate (ARCHITECTURE.md §Cloud Run egress) |
-| LB routing | Path-based at LB layer (`/api/*` → backend, `/*` → frontend) | Cloud Armor covers both services; frontend not in API request path |
-| Database access | PSA private IP (not Cloud SQL Auth Proxy) | Lower latency, no sidecar, network-level enforcement |
-| Secret injection | Secret Manager env var refs | Secrets never in plaintext; versioned and auditable |
-| Layering | Two independent roots + per-env state | Smaller blast radius; `workload` reads `foundation` via remote state |
-| CI/CD auth | Workload Identity Federation (keyless) | No long-lived SA keys in GitHub (see `bootstrap/`) |
-| Ingress default | `INGRESS_TRAFFIC_INTERNAL_ONLY` (module default) | Secure by default; both services here explicitly opt into `INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER` |
+| Compute | GKE **Standard** | Node pools, DaemonSets and taints under our control; Autopilot trades that for less ops |
+| Cluster exposure | Private nodes **and** private IP endpoint | Nothing in the cluster has a public IP |
+| Control-plane access from CI | **DNS-based endpoint**, IAM-authorised | GitHub runners have no stable IP and no path into the VPC; no bastion, no `0.0.0.0/0` allowlist |
+| Delivery | **Argo CD** app-of-apps | Terraform stops at one root Application; Git is the only way to change the cluster |
+| Edge | GKE **Gateway API** (in Git) + Terraform-owned IP/WAF/cert | Routing is release-lifecycle (Git); IP, WAF and certs are infra-lifecycle (Terraform) |
+| Workload identity | **Workload Identity** KSA → GSA | No SA keys in pods; per-workload least privilege |
+| Secrets | Secret Manager → **External Secrets Operator** | Source of truth stays in Secret Manager; ESO's GSA reads only the listed secrets |
+| Egress | **Cloud NAT** scoped to the node subnet | Private nodes still pull public images and reach GitHub |
+| Environments | hml: zonal cluster, smaller on-demand nodes; prod: regional, larger on-demand nodes | Free-tier control plane where a zone outage is acceptable; no Spot preemptions in either |
+| CI identities | read-only **plan** SA vs **deployer** SA bound to the GitHub `environment` claim | A PR can plan but can never mint a token that writes |
 
 ---
 
 ## Usage
 
-### First-Time Setup
+### First-time setup
 
-**1. State bucket** (must exist before `init`; intentionally **not** managed by Terraform, so `destroy` never deletes it while the lock is held). One bucket per env, named without the project id — `serverless-hml` / `serverless-prod`:
+**1. State bucket** (must exist before `init`; intentionally **not** managed by Terraform). One per env:
 ```bash
 gcloud storage buckets create gs://serverless-hml \
   --location=US-CENTRAL1 --uniform-bucket-level-access --project=<project-id>
 gcloud storage buckets update gs://serverless-hml --versioning
 ```
-> GCS bucket names are **globally unique** across all of GCP. If `serverless-hml` is taken, pick a unique variant and change it in one place: the layer `environments/<env>/backend.hcl` (`bucket`) and `workload/environments/<env>/terraform.tfvars` (`state_bucket`). The name is non-secret, so it lives in those committed files.
+> Bucket names are global. If `serverless-hml` is taken, change it in `foundation|workload/environments/<env>/backend.hcl` and `workload/environments/<env>/terraform.tfvars` (`state_bucket`), and in `bootstrap/main.tf` (`local.state_bucket`).
 
-**2. Bootstrap keyless CI auth** (once per environment, with owner credentials; `project_id` is passed at runtime, not committed):
+**2. Bootstrap** (once per environment, owner credentials). Enables the APIs, creates the WIF pool, the read-only plan SA and the deployer SA:
 ```bash
 terraform -chdir=bootstrap init
 terraform -chdir=bootstrap apply \
   -var-file=environments/hml/terraform.tfvars \
   -var="project_id=<your-hml-project-id>"
-# Copy the two outputs into GitHub secrets: HML_WIF_PROVIDER, HML_WIF_SA
 ```
-Bootstrap also grants the deployer SA `roles/storage.objectAdmin` on the state bucket. See [bootstrap/](bootstrap/).
 
-**3. GitHub secrets** (per env — nothing project-identifying is committed):
+**3. GitHub configuration** (per env — nothing project-identifying is committed):
 
-| Secret | Purpose |
+| Secret | Value |
 |---|---|
-| `HML_PROJECT_ID` / `PROD_PROJECT_ID` | GCP project id → injected as `TF_VAR_project_id` (masked in logs) |
-| `HML_WIF_PROVIDER` / `PROD_WIF_PROVIDER` | Workload Identity provider resource name |
-| `HML_WIF_SA` / `PROD_WIF_SA` | Deployer service-account email |
+| `HML_PROJECT_ID` / `PROD_PROJECT_ID` | GCP project id → `TF_VAR_project_id` |
+| `HML_WIF_PROVIDER` / `PROD_WIF_PROVIDER` | bootstrap output `workload_identity_provider` |
+| `HML_PLAN_SA` / `PROD_PLAN_SA` | bootstrap output `plan_service_account` (read-only) |
+| `HML_WIF_SA` / `PROD_WIF_SA` | bootstrap output `deployer_service_account` |
 | `HML_DB_PASSWORD` / `PROD_DB_PASSWORD` | `TF_VAR_db_password` |
 | `HML_API_SECRET_KEY` / `PROD_API_SECRET_KEY` | `TF_VAR_api_secret_key` |
 
-Add a required reviewer to the `prod` GitHub Environment for gated prod applies.
+Create the GitHub Environments **`hml`** and **`prod`** — the deployer SA only accepts tokens from jobs that declare one of them. Put a required reviewer and a deployment-branch policy on `prod`.
 
-Committed tfvars hold only non-identifying values (`name`, `region`, `environment`, `state_bucket`).
-
-**4. Deploy.** Normally via the `terraform-deploy` workflow (pick `environment` + `layer`). Locally, foundation first (export only the secret values the CI gets from secrets):
+**4. Deploy** via `terraform-deploy` (`environment`, `layer: both`). Locally:
 ```bash
 ENV=hml
-export TF_VAR_project_id=<your-hml-project-id>
-export TF_VAR_db_password=... TF_VAR_api_secret_key=...
+export TF_VAR_project_id=<project-id> TF_VAR_db_password=... TF_VAR_api_secret_key=...
 
 terraform -chdir=foundation init -backend-config=environments/$ENV/backend.hcl
 terraform -chdir=foundation apply -var-file=environments/$ENV/terraform.tfvars
@@ -151,113 +130,86 @@ terraform -chdir=workload init -backend-config=environments/$ENV/backend.hcl
 terraform -chdir=workload apply -var-file=environments/$ENV/terraform.tfvars
 ```
 
+**5. Reach the cluster and Argo CD**
+```bash
+$(terraform -chdir=foundation output -raw get_credentials_command)   # --dns-endpoint
+kubectl -n argocd port-forward svc/argocd-server 8080:443            # https://localhost:8080
+$(terraform -chdir=workload output -raw argocd_initial_password_command)
+```
+
+**6. Wire the GitOps repo to this layer's outputs.** The Gateway and GCPBackendPolicy reference Terraform-owned objects by name:
+
+| GitOps field | Terraform output |
+|---|---|
+| Gateway annotation `networking.gke.io/addresses` | `gateway_address_name` |
+| Gateway option `networking.gke.io/pre-shared-certs` | `gateway_certificate_name` (needs `domain_name`) |
+| GCPBackendPolicy `spec.default.securityPolicy` | `cloud_armor_policy_name` |
+| KSA annotation `iam.gke.io/gcp-service-account` | `backend_sa_email`, `frontend_sa_email`, `external_secrets_sa_email` |
+| ClusterSecretStore `clusterName` / `clusterLocation` | foundation `cluster_name` / `cluster_location` |
+| backend `cloudSqlProxy.instanceConnectionName` | `database_connection_name` |
+
+The KSA names Workload Identity trusts are set in `workload/environments/<env>/terraform.tfvars` (`backend_ksas`, `frontend_ksas`, `external_secrets_ksas`).
+
 ### Destroy
 
-Destroy runs per layer in reverse order (**workload before foundation**), which the `terraform-destroy` workflow handles when you pick `layer: both`. Before destroying the foundation, the workflow polls (up to 120 min) until GCP has released the `purpose=SERVERLESS` address that Direct VPC Egress pins in the private subnet — measured at over an hour after the services are gone. Locally (with the same `TF_VAR_*` exports as the deploy step), wait for that release yourself before the foundation destroy:
-```bash
-ENV=hml
-terraform -chdir=workload init -backend-config=environments/$ENV/backend.hcl
-terraform -chdir=workload destroy -var-file=environments/$ENV/terraform.tfvars
+`terraform-destroy` with `layer: both` handles the ordering GKE needs (ARCHITECTURE.md §Teardown):
 
-# must print nothing before the foundation destroy can succeed
-gcloud compute addresses list --regions=us-central1 --filter="purpose=SERVERLESS"
+1. **Drain** — freeze Argo CD automation, delete ApplicationSets and Applications (cascade removes the Gateway), delete leftover Gateways/Ingresses/LoadBalancer Services, wait until no forwarding rule holds the static IP.
+2. **Destroy workload** — Argo CD, data, identities, static IP.
+3. **Preflight** — fail fast if a GKE-built backend service/URL map is still around.
+4. **Destroy foundation** — node pool + cluster first, sweep NEGs and GKE firewall rules left in the VPC, then the rest (the PSA buffer still waits ~10 min).
+5. Report unattached PVC disks (not deleted).
 
-terraform -chdir=foundation init -backend-config=environments/$ENV/backend.hcl
-terraform -chdir=foundation destroy -var-file=environments/$ENV/terraform.tfvars
-```
-The foundation destroy still waits ~10 min on the PSA lock buffer (`decommissioning_buffer`) before removing the peering and VPC. The state bucket is preserved; delete it manually when no longer needed. In `prod` the audit-log bucket is not force-destroyed (see Security Model §6), so a prod workload destroy stops there while it holds logs.
-
-See [docs/STATE_MIGRATION.md](docs/STATE_MIGRATION.md) if migrating from the old single-root layout.
+`prod` has `deletion_protection = true` on the cluster: its destroy stops at step 4 until that is turned off in a reviewed change. The prod audit-log bucket is not force-destroyed either.
 
 ---
 
 ## CI/CD
 
-Five GitHub Actions workflows in `.github/workflows/` (one per pipeline):
-
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `terraform-test` | PR | Module unit tests (`mock_provider`, no creds) |
-| `security-scan` | PR | Trivy IaC scan, fails on HIGH/CRITICAL, uploads SARIF |
-| `terraform-plan` | PR + dispatch | Plan per layer (env inferred from base branch), posted as a PR comment; skips workload when foundation isn't applied |
-| `terraform-deploy` | manual dispatch | Gated by tests + Trivy; applies a saved plan; pick `environment` + `layer [foundation\|workload\|both]` |
-| `terraform-destroy` | manual dispatch | Typed confirmation; reverse-order teardown |
+| `terraform-test` | PR | Every module with a `tests/` dir (discovered, not listed) + layer-contract check |
+| `security-scan` | PR | Trivy IaC scan (Terraform + Helm), fails on HIGH/CRITICAL, uploads SARIF |
+| `lint` | PR | actionlint + shellcheck (pinned with checksums) |
+| `terraform-docs` | PR | Module READMEs must match their variables/outputs |
+| `terraform-plan` | PR + dispatch | Credential-free validate, then plan per layer with the **read-only plan SA** (`-lock=false`, workload `-refresh=false`); posted as a PR comment |
+| `terraform-deploy` | manual | Gates (tests, validate, Trivy) → **deployer SA** → saved plan → apply |
+| `terraform-destroy` | manual | Typed confirmation → drain → workload → preflight → foundation in passes |
 
-All cloud-touching workflows authenticate via **Workload Identity Federation** (no static keys). `prod` runs pause for approval via the `prod` GitHub Environment.
+Reusable `_terraform-test`, `_terraform-validate` and `_security-scan` are called by both the PR checks and the deploy gate, so they cannot drift apart. Credential selection lives once, in `.github/actions/gcp-terraform-setup`.
 
 ---
 
 ## Security Model
 
-Defense in depth — six layers:
+1. **Edge** — Cloud Armor (OWASP CRS, rate limiting, Adaptive Protection) attached to the Gateway's backend services through `GCPBackendPolicy`.
+2. **Network** — private nodes, private IP endpoint, no GCP-public CIDRs authorised; egress only through NAT scoped to the node subnet; NetworkPolicy enforced by Dataplane V2.
+3. **Control plane** — external access only through the DNS endpoint, authorised by IAM per request; no client certificates.
+4. **Identity** — dedicated node SA (`roles/container.defaultNodeServiceAccount` + Artifact Registry reader); pods use Workload Identity, bound per `namespace/ksa`.
+5. **Database** — Cloud SQL private IP only (PSA), TLS enforced, `backend-sa` holds `cloudsql.client`.
+6. **Secrets** — Secret Manager; ESO's GSA has accessor on the listed secrets only. Initial values come from `TF_VAR_*` and **are** in Terraform state — protect the state bucket.
+7. **GitOps boundary** — the `apps` AppProject cannot create cluster-scoped resources, ClusterRoles or ClusterRoleBindings, and only deploys to `frontend-*` / `backend-*`.
+8. **Audit** — `cloudaudit.googleapis.com` logs exported to GCS, 365-day retention.
 
-**1. Cloud Armor WAF**
-Applied to both the frontend and API backend services on the Global Load Balancer. Rules: OWASP Top 10 managed rules (SQLi, XSS), rate limiting (100 req/min per IP → 429), and ML-based Adaptive Protection.
-
-**2. Load Balancer Ingress Restriction**
-Both Cloud Run services are configured with `ingress = INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER`. Direct `*.run.app` requests are rejected with HTTP 403. All traffic must pass through the LB and Cloud Armor. Because the external LB forwards requests without an identity token, both services grant `roles/run.invoker` to `allUsers` — the ingress setting, not IAM, is the access control here.
-
-**3. Path-Based Routing (no frontend proxy)**
-`/api` and `/api/*` routes are handled by the LB URL map directly to the backend Cloud Run service. The frontend never proxies API requests — all traffic paths are covered by Cloud Armor at the LB.
-
-**4. Database Isolation**
-Cloud SQL has no public IP. It is reachable only via Private Service Access (PSA) peering from within the VPC; the backend connects to its private IP over TLS (`sslmode=require`, enforced by `ssl_mode = ENCRYPTED_ONLY`). The backend service account has `roles/cloudsql.client` only — not admin.
-
-**5. Secret Management**
-Secrets (`app-api-key`, `db-password`) are stored in Secret Manager and injected as environment variable references at Cloud Run runtime, so they never appear in container config. Their initial values come from `TF_VAR_*` and **are** stored in Terraform state (`google_secret_manager_secret_version`, `google_sql_user`) — protect the state bucket accordingly. A 30-day rotation notification is wired to Pub/Sub + a Cloud Run Job; the handler is a placeholder and the push trigger needs rework before rotation actually happens (see `modules/workload/secret_rotation/README.md`). Service accounts have `roles/secretmanager.secretAccessor` scoped per-secret (not project-wide).
-
-**6. Audit Logging**
-All `cloudaudit.googleapis.com` logs are exported to a GCS bucket with a 365-day retention lifecycle rule. In `prod` the bucket has `force_destroy = false`, so logs survive a teardown (the destroy fails on the non-empty bucket instead of deleting them); `hml` uses `force_destroy = true` so it can be torn down routinely.
-
-### IAM — Principle of Least Privilege
-
-| Service Account | Role | Scope |
+| Service account | Grants | Scope |
 |---|---|---|
-| `backend-sa` | `roles/cloudsql.client` | Project |
-| `backend-sa` | `roles/storage.objectUser` | App storage bucket only (read-write GCS FUSE mount) |
-| `backend-sa` | `roles/secretmanager.secretAccessor` | `app-api-key` secret only |
-| `backend-sa` | `roles/secretmanager.secretAccessor` | `db-password` secret only |
-| `frontend-sa` | — (no roles; runtime identity only) | — |
-| `<name>-rotation-invoker` | `roles/run.invoker` | Secret rotation Cloud Run Job only |
-| `tf-deployer-<env>` (CI) | curated list in `bootstrap/variables.tf` (`deployer_roles`) | Project + state bucket `objectAdmin` |
+| `<name>-gke-nodes` | `container.defaultNodeServiceAccount`, `artifactregistry.reader` | Project |
+| `backend-sa` | `cloudsql.client`; `storage.objectUser`; `secretAccessor` | Project; app bucket; `app-api-key` |
+| `frontend-sa` | — (identity only) | — |
+| `external-secrets-sa` | `secretAccessor` | `app-api-key`, `db-password` |
+| `tf-plan-<env>` | `viewer`, `iam.securityReviewer`, state `objectViewer` | Project; state bucket |
+| `tf-deployer-<env>` | `deployer_roles` in `bootstrap/variables.tf` | Project; state bucket `objectAdmin` |
 
 ---
 
 ## Troubleshooting
 
-### Workload plan fails: foundation outputs not found
+**Workload plan skipped: "foundation layer does not currently publish everything".** Foundation is not applied (or half destroyed) for that env. Apply `layer: foundation` first.
 
-**Cause:** The `workload` layer reads `foundation`'s remote state. If foundation
-hasn't been applied for that environment (or was destroyed), there are no outputs
-to read.
+**`terraform-deploy` fails at auth with `Permission 'iam.serviceAccounts.getAccessToken' denied`.** The job's token has no matching `environment` claim. Check that the GitHub Environment exists with the exact name (`hml`/`prod`) and that `bootstrap/` was re-applied after this change.
 
-**Resolution:** Apply `foundation` for the environment first (`terraform-deploy`
-→ `layer: foundation`), then re-run. The `terraform-plan` workflow already detects
-this and skips the workload plan with an explanatory message instead of erroring.
+**Helm provider: `Unauthorized` / `forbidden` reaching the cluster.** The identity needs `container.clusters.connect` (in `roles/container.admin` for the deployer) and the DNS endpoint must allow external traffic (`gke_cluster` default).
 
-> **Note:** A `subnetwork is already being used by serverless-ipv4-*` failure on
-> foundation destroy means GCP has not yet released the `purpose=SERVERLESS`
-> address reservation that Direct VPC Egress pins in the subnet. It cannot be
-> deleted manually and has no published release SLA. The `terraform-destroy`
-> workflow waits it out automatically; if you hit this destroying locally, see
-> [docs/runbooks/serverless-ipv4-reservation.md](docs/runbooks/serverless-ipv4-reservation.md).
+**Foundation destroy: `subnetwork ... is already being used by .../networkEndpointGroups/...`.** A NEG survived the cluster. Re-run `terraform-destroy` with `layer: foundation` — the sweep deletes NEGs in the VPC before the subnet.
 
----
-
-### State lock error: `Error acquiring the state lock`
-
-```
-Error: Error acquiring the state lock
-Lock Info:
-  ID: 1234567890
-  Operation: OperationTypeApply
-```
-
-**Cause:** A previous Terraform operation was interrupted without releasing the lock, or two concurrent operations were attempted.
-
-**Resolution:** Verify no Terraform process is actively running, then force-unlock:
-```bash
-terraform force-unlock -force <lock-id>
-```
-
-Replace `<lock-id>` with the ID shown in the error message.
+**State lock: `Error acquiring the state lock`.** Make sure nothing is running, then `terraform force-unlock -force <lock-id>`.
