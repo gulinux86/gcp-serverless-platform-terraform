@@ -1,67 +1,36 @@
-name: Terraform Module Tests
+# Native `terraform test` as a pull-request gate. The steps live in
+# _terraform-test.yml, which the deploy workflow also calls.
+#
+# The module list is not here, and not there either: the reusable workflow derives it
+# from whichever modules have a `tests/` directory. It used to be a hand-written
+# matrix in this file AND in the deploy gate, with CLAUDE.md telling contributors to
+# update both — and the two had already diverged.
+name: terraform-test
 
 on:
   pull_request:
-    branches:
-      - develop
-      - main
+    types: [opened, synchronize, reopened]
+    branches: [develop, main]
     paths:
-      - "modules/**"
-      - ".github/workflows/terraform-*.yml"
-  push:
-    branches:
-      - develop
-      - main
-    paths:
-      - "modules/**"
+      - "**.tf"
+      - "**.tftest.hcl"
+      - ".github/workflows/terraform-test.yml"
+      - ".github/workflows/_terraform-test.yml"
+      - "scripts/check-layer-contract.sh"
+  workflow_dispatch:
 
-# Read-only — no GCP credentials, no state writes
 permissions:
   contents: read
 
-# Cancel in-progress test run when a new commit is pushed to the same PR
 concurrency:
-  group: terraform-test-${{ github.event.pull_request.number || github.ref }}
+  group: tf-test-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
-    name: "Test / ${{ matrix.module }}"
-    runs-on: ubuntu-latest
-
-    strategy:
-      # Run all modules even if one fails — full picture of what broke
-      fail-fast: false
-      matrix:
-        module:
-          - modules/foundation/vpc
-          - modules/foundation/cloud_firewall
-          - modules/workload/cloud_armor
-          - modules/workload/cloud_run_service
-          - modules/workload/https_load_balancer
-          - modules/workload/iam_service_account
-          - modules/workload/cloud_sql
-
-    steps:
-      - name: Checkout
-        # Pinned to a commit SHA for supply-chain security — same as the other workflows.
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: Setup Terraform
-        # mock_provider requires Terraform >= 1.7.0. Same version line (~> 1.9)
-        # as the plan/deploy/destroy pipelines.
-        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-        with:
-          terraform_version: "~> 1.9"
-
-      - name: Terraform Init
-        working-directory: ${{ matrix.module }}
-        # -backend=false: modules have no backend configuration.
-        # Without this flag terraform init exits with an error.
-        run: terraform init -backend=false
-
-      - name: Terraform Test
-        working-directory: ${{ matrix.module }}
-        # No GCP credentials required — all tests use mock_provider + command=plan.
-        # The provider binary is downloaded by init but never called during tests.
-        run: terraform test
+    uses: ./.github/workflows/_terraform-test.yml
+    with:
+      # The foundation -> workload output contract. A renamed output passes fmt,
+      # validate, every suite and Trivy, and fails at run time in the layer that
+      # reads it — see ARCHITECTURE.md §Layer contract.
+      contract-script: ./scripts/check-layer-contract.sh

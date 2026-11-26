@@ -1,0 +1,40 @@
+variable "namespace" {
+  type        = string
+  description = "Namespace Argo CD runs in. The projects and the root Application are created here."
+}
+
+variable "platform_repo_url" {
+  type        = string
+  description = "Git repository holding platform components. The platform AppProject accepts sources only from here."
+}
+
+variable "platform_repo_revision" {
+  type        = string
+  description = "Branch or tag the root Application tracks. A branch means Argo follows every commit; a tag means promotions are explicit."
+}
+
+variable "platform_repo_path" {
+  type        = string
+  description = "Directory of the platform repository the root Application watches. It must hold Application/ApplicationSet manifests only."
+  default     = "apps"
+}
+
+variable "apps_repo_url" {
+  type        = string
+  description = "Git repository that will hold applications. The apps AppProject is created ahead of the repository existing, so the privilege boundary is written and reviewed before there is pressure to bend it."
+}
+
+variable "apps_namespaces" {
+  type        = list(string)
+  description = "Namespace patterns the apps project may deploy into. A prefix glob such as [\"app-*\"] avoids a Terraform change per application while keeping kube-system, gke-gateway-system, argocd and external-secrets out of reach — they do not match the prefix."
+}
+
+variable "platform_source_repos" {
+  type        = list(string)
+  description = "Every repository the platform project may pull from, Helm chart repositories included. A multi-source Application takes its chart from one repo and its values from another, and Argo CD checks both — listing only the Git repository fails every chart-based component."
+}
+
+variable "apps_source_repos" {
+  type        = list(string)
+  description = "Every repository the apps project may pull from. Same rule: chart repositories count."
+}

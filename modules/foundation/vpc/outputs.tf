@@ -9,13 +9,23 @@ output "network_id" {
 }
 
 output "private_subnet_name" {
-  description = "Private subnet name"
+  description = "Node subnet name"
   value       = google_compute_subnetwork.private.name
 }
 
 output "private_subnet_id" {
-  description = "Private subnet ID"
+  description = "Node subnet ID"
   value       = google_compute_subnetwork.private.id
+}
+
+output "pods_range_name" {
+  description = "Name of the secondary range GKE allocates pod IPs from"
+  value       = google_compute_subnetwork.private.secondary_ip_range[0].range_name
+}
+
+output "services_range_name" {
+  description = "Name of the secondary range GKE allocates Service ClusterIPs from"
+  value       = google_compute_subnetwork.private.secondary_ip_range[1].range_name
 }
 
 output "psa_range_name" {
@@ -27,14 +37,3 @@ output "psa_connection_id" {
   description = "PSA connection ID"
   value       = google_service_networking_connection.default.id
 }
-
-output "secondary_subnet_name" {
-  description = "Secondary private subnet name"
-  value       = google_compute_subnetwork.private_2.name
-}
-
-output "secondary_subnet_id" {
-  description = "Secondary private subnet ID"
-  value       = google_compute_subnetwork.private_2.id
-}
-

@@ -8,6 +8,8 @@
 #     - decommissioning_buffer (10 min time_sleep): GCP holds PSA locks for several
 #       minutes after subnet deletion. Without the buffer, terraform destroy races
 #       against internal GCP cleanup and fails with "resource in use" errors.
+#     - the node subnet carries two secondary ranges: a private GKE cluster is
+#       VPC-native, and without them the cluster cannot be created at all.
 #   These tests prevent well-intentioned "cleanup" of these patterns by future
 #   contributors who don't know why they exist.
 
@@ -27,17 +29,34 @@ run "vpc_does_not_auto_create_subnets" {
   }
 }
 
-run "private_subnets_have_google_access" {
+run "node_subnet_has_google_access" {
   command = plan
 
   assert {
     condition     = google_compute_subnetwork.private.private_ip_google_access == true
-    error_message = "Primary private subnet must have Private Google Access enabled. Cloud Run Direct VPC Egress instances need it to reach Google APIs (Secret Manager, Artifact Registry) without a public IP."
+    error_message = "The node subnet must have Private Google Access enabled. Private GKE nodes have no public IP and reach Artifact Registry, Secret Manager and the GKE APIs through it."
+  }
+}
+
+run "node_subnet_is_vpc_native" {
+  command = plan
+
+  assert {
+    condition     = length(google_compute_subnetwork.private.secondary_ip_range) == 2
+    error_message = "The node subnet must carry exactly two secondary ranges (pods, services). A VPC-native GKE cluster references them by name."
   }
 
   assert {
-    condition     = google_compute_subnetwork.private_2.private_ip_google_access == true
-    error_message = "Secondary private subnet must have Private Google Access enabled."
+    condition = alltrue([
+      for r in google_compute_subnetwork.private.secondary_ip_range :
+      r.ip_cidr_range != google_compute_subnetwork.private.ip_cidr_range
+    ])
+    error_message = "Secondary ranges must not reuse the node range."
+  }
+
+  assert {
+    condition     = google_compute_subnetwork.private.secondary_ip_range[0].ip_cidr_range != google_compute_subnetwork.private.secondary_ip_range[1].ip_cidr_range
+    error_message = "Pod and Service ranges must be distinct."
   }
 }
 
@@ -70,14 +89,5 @@ run "psa_connection_uses_abandon_policy" {
   assert {
     condition     = google_service_networking_connection.default.deletion_policy == "ABANDON"
     error_message = "PSA connection must use deletion_policy=ABANDON. The GCP servicenetworking API frequently returns 409 errors when Terraform attempts to delete the peering explicitly — ABANDON lets GCP clean it up when the network is deleted."
-  }
-}
-
-run "subnets_do_not_overlap" {
-  command = plan
-
-  assert {
-    condition     = google_compute_subnetwork.private.ip_cidr_range != google_compute_subnetwork.private_2.ip_cidr_range
-    error_message = "The two private subnets must occupy distinct ranges. Cloud Run attaches Direct VPC Egress interfaces to the primary subnet, and an overlapping secondary range would make routing ambiguous."
   }
 }

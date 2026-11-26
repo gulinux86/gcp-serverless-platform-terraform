@@ -1,8 +1,8 @@
 name: terraform-deploy
 
 # Manual, controlled deploys: you pick the environment and layer when you run it.
-# Nothing applies automatically on merge. PROD is gated by the `prod` GitHub
-# Environment (required reviewer). Apply always uses a saved plan.
+# Nothing applies automatically on merge. PROD is still gated by the `prod`
+# GitHub Environment (required reviewer). Apply always uses a saved plan.
 on:
   workflow_dispatch:
     inputs:
@@ -14,74 +14,51 @@ on:
       layer:
         description: "Which layer(s) to apply"
         required: true
-        default: workload
+        default: both
         type: choice
         options: [foundation, workload, both]
 
 permissions:
   contents: read
   id-token: write # OIDC -> Workload Identity Federation
+  # Granted because the security gate calls a reusable workflow that declares it. A
+  # called workflow cannot hold a permission its caller lacks — omitting this
+  # rejects the whole run at validation, with `startup_failure` and no log. The gate
+  # passes `upload-sarif: false`, so nothing here actually writes to code scanning.
+  security-events: write
 
 jobs:
-  # Gate 1 — module unit tests. Mocked providers (command = plan), no GCP creds,
-  # no infra, env/layer-agnostic. A failure blocks the apply.
+  # Gate 1 — module unit tests and the layer contract, both credential-free.
+  # Calls the same workflow the pull-request check calls, rather than repeating
+  # its steps, so the gate and the check cannot drift apart.
   test:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read # credential-free
-    strategy:
-      fail-fast: true
-      matrix:
-        module:
-          - modules/foundation/vpc
-          - modules/foundation/cloud_firewall
-          - modules/workload/cloud_armor
-          - modules/workload/cloud_run_service
-          - modules/workload/https_load_balancer
-          - modules/workload/iam_service_account
-          - modules/workload/cloud_sql
-    steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+    uses: ./.github/workflows/_terraform-test.yml
+    with:
+      contract-script: ./scripts/check-layer-contract.sh
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-        with:
-          terraform_version: "~> 1.9"
+  # Gate 1b — formatting and validity of the layer roots, credential-free.
+  # The module suites only `fmt` the modules that have tests, so foundation/*.tf
+  # and workload/*.tf would otherwise reach the apply step unchecked.
+  validate:
+    uses: ./.github/workflows/_terraform-validate.yml
+    with:
+      layers: '["foundation", "workload"]'
 
-      - name: Terraform fmt
-        run: terraform fmt -check -recursive ${{ matrix.module }}
-
-      - name: Terraform test
-        run: |
-          terraform -chdir=${{ matrix.module }} init -input=false -backend=false
-          terraform -chdir=${{ matrix.module }} test -no-color
-
-  # Gate 2 — Trivy IaC misconfiguration scan. Fails on HIGH/CRITICAL using the
-  # committed .trivyignore. Hard pre-apply gate (no SARIF upload here).
+  # Gate 2 — Trivy IaC scan, the same workflow the pull-request check calls.
+  # SARIF upload is off here on purpose: code scanning results belong to a pull
+  # request, and a deploy is not one. This is a hard pre-apply gate, nothing more.
   security:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-
-      - name: Trivy config scan (gate)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: config
-          scan-ref: .
-          format: table
-          severity: HIGH,CRITICAL
-          trivyignores: .trivyignore
-          exit-code: "1"
+    uses: ./.github/workflows/_security-scan.yml
+    with:
+      upload-sarif: false
 
   deploy:
-    needs: [test, security] # apply only after both gates pass
+    needs: [test, validate, security] # apply only after every gate passes
     runs-on: ubuntu-latest
     # Ties to the GitHub Environment: `prod` carries the required reviewer, so a
-    # prod run pauses for approval before this job starts.
+    # prod run pauses for approval before this job starts. It is also what puts
+    # the `environment` claim in the OIDC token — the only token the deployer SA
+    # accepts (bootstrap/main.tf).
     environment: ${{ github.event.inputs.environment }}
     # Never run two applies for the same env at once; never cancel one mid-apply.
     concurrency:
@@ -89,57 +66,35 @@ jobs:
       cancel-in-progress: false
     env:
       ENVIRONMENT: ${{ github.event.inputs.environment }}
+      LAYER_INPUT: ${{ github.event.inputs.layer }}
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Select environment auth
-        # Secrets reach the script as env vars, never interpolated into its text:
-        # a value containing quotes or $ can't break (or inject into) the shell.
-        env:
-          PROD_WIF_PROVIDER: ${{ secrets.PROD_WIF_PROVIDER }}
-          PROD_WIF_SA: ${{ secrets.PROD_WIF_SA }}
-          PROD_PROJECT_ID: ${{ secrets.PROD_PROJECT_ID }}
-          PROD_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
-          PROD_API_SECRET_KEY: ${{ secrets.PROD_API_SECRET_KEY }}
-          HML_WIF_PROVIDER: ${{ secrets.HML_WIF_PROVIDER }}
-          HML_WIF_SA: ${{ secrets.HML_WIF_SA }}
-          HML_PROJECT_ID: ${{ secrets.HML_PROJECT_ID }}
-          HML_DB_PASSWORD: ${{ secrets.HML_DB_PASSWORD }}
-          HML_API_SECRET_KEY: ${{ secrets.HML_API_SECRET_KEY }}
-        run: |
-          if [ "$ENVIRONMENT" = "prod" ]; then P=PROD; else P=HML; fi
-          v() { local n="${P}_$1"; printf '%s' "${!n}"; }
-          {
-            echo "WIF_PROVIDER=$(v WIF_PROVIDER)"
-            echo "DEPLOYER_SA=$(v WIF_SA)"
-            # project_id via secret (masked). State bucket name is non-secret (backend.hcl).
-            echo "TF_VAR_project_id=$(v PROJECT_ID)"
-            echo "TF_VAR_db_password=$(v DB_PASSWORD)"
-            echo "TF_VAR_api_secret_key=$(v API_SECRET_KEY)"
-          } >> "$GITHUB_ENV"
-
-      - name: Authenticate to GCP (Workload Identity Federation)
-        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+      - name: Authenticate to GCP and install Terraform
+        uses: ./.github/actions/gcp-terraform-setup
         with:
-          workload_identity_provider: ${{ env.WIF_PROVIDER }}
-          service_account: ${{ env.DEPLOYER_SA }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
-        with:
-          terraform_version: "~> 1.9"
+          role: deploy
+          terraform-version: "1.17.2"
+          workload-identity-provider: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_WIF_PROVIDER || secrets.HML_WIF_PROVIDER }}
+          deploy-service-account: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_WIF_SA || secrets.HML_WIF_SA }}
 
       - name: Resolve layers
         run: |
-          # "both" must apply foundation BEFORE workload (workload reads its state).
-          if [ "${{ github.event.inputs.layer }}" = "both" ]; then
+          # "both" must apply foundation BEFORE workload (workload reads its state,
+          # and installs Argo CD into the cluster foundation creates).
+          if [ "$LAYER_INPUT" = "both" ]; then
             echo "LAYERS=foundation workload" >> "$GITHUB_ENV"
           else
-            echo "LAYERS=${{ github.event.inputs.layer }}" >> "$GITHUB_ENV"
+            echo "LAYERS=$LAYER_INPUT" >> "$GITHUB_ENV"
           fi
 
       - name: Apply (saved plan per layer)
+        # Secrets reach the script as env vars, never interpolated into its text.
+        env:
+          TF_VAR_project_id: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_PROJECT_ID || secrets.HML_PROJECT_ID }}
+          TF_VAR_db_password: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_DB_PASSWORD || secrets.HML_DB_PASSWORD }}
+          TF_VAR_api_secret_key: ${{ env.ENVIRONMENT == 'prod' && secrets.PROD_API_SECRET_KEY || secrets.HML_API_SECRET_KEY }}
         run: |
           set -euo pipefail
           for L in $LAYERS; do
@@ -152,3 +107,21 @@ jobs:
             terraform -chdir="$L" apply -input=false -auto-approve tfplan
             echo "::endgroup::"
           done
+
+      # Where to look next. Argo CD is not exposed, so the summary carries the
+      # commands rather than a URL.
+      - name: Summary
+        if: contains(env.LAYERS, 'workload')
+        run: |
+          {
+            echo "### ${ENVIRONMENT}: platform handed over to Argo CD"
+            echo
+            echo '```'
+            terraform -chdir=foundation output -raw get_credentials_command 2>/dev/null || true
+            echo
+            terraform -chdir=workload output -raw argocd_port_forward_command
+            echo
+            echo "Gateway static IP name:  $(terraform -chdir=workload output -raw gateway_address_name)"
+            echo "Cloud Armor policy name: $(terraform -chdir=workload output -raw cloud_armor_policy_name)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

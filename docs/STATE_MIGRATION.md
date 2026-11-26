@@ -1,5 +1,7 @@
 # State Migration — single root → two independent layers
 
+> **Historical.** This runbook covers the single-root → two-layer migration of the Cloud Run platform. The layers now hold a private GKE cluster and Argo CD (see ../ARCHITECTURE.md); the commands still apply, the resource addresses do not.
+
 This project moved from a **single root module** (one `main.tf` orchestrating
 `foundation` and `workload` as submodules, state prefix `root`) to **two
 independent root layers**, each with its own per-environment state:

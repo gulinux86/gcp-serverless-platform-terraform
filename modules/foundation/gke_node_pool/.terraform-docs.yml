@@ -1,0 +1,30 @@
+formatter: "markdown table"
+
+output:
+  file: "README.md"
+  mode: inject
+  template: |-
+    <!-- BEGIN_TF_DOCS -->
+    {{ .Content }}
+    <!-- END_TF_DOCS -->
+
+sort:
+  enabled: true
+  by: required
+
+settings:
+  # Off: with it on, the Providers table shows the version in whatever
+  # .terraform.lock.hcl sits next to the module, so the README churns on every
+  # `terraform init -upgrade` and differs between machines. The constraint in
+  # the code is what a README should document (same choice as eks-terraform).
+  lockfile: false
+  anchor: true
+  color: true
+  default: true
+  description: true
+  escape: true
+  html: true
+  indent: 2
+  required: true
+  sensitive: true
+  type: true

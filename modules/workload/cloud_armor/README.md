@@ -1,6 +1,6 @@
 # cloud_armor
 
-Cloud Armor WAF security policy with OWASP Top 10 managed rules, per-IP rate limiting, and ML-based Adaptive Protection. Creates the security policy only — it must be attached to a backend service separately via the `https_load_balancer` module.
+Cloud Armor WAF security policy with OWASP Top 10 managed rules, per-IP rate limiting, and ML-based Adaptive Protection. Creates the security policy only — on GKE it is attached to the Gateway-built backend services from Git, through a `GCPBackendPolicy`.
 
 ## Usage
 
@@ -12,12 +12,22 @@ module "cloud_armor" {
   name                 = "app-armor"
   rate_limit_threshold = 100
 }
+```
 
-module "lb" {
-  source = "../modules/workload/https_load_balancer"
-  # ...
-  security_policy_id = module.cloud_armor.security_policy_self_link
-}
+```yaml
+# GitOps repository — attach the policy to a Service behind the Gateway
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: backend-armor
+  namespace: backend-prod
+spec:
+  targetRef:
+    group: ""
+    kind: Service
+    name: backend
+  default:
+    securityPolicy: app-prod-armor-policy # module.cloud_armor.security_policy_name
 ```
 
 ## Rules Configured
@@ -35,7 +45,7 @@ Adaptive Protection (ML-based L7 DDoS defense) is enabled on all policies.
 
 ### Attachment is not automatic
 
-This module creates the security policy but does **not** attach it to any backend service. Pass `module.cloud_armor.security_policy_self_link` to the `security_policy_id` input of the `https_load_balancer` module. If not attached, requests bypass Cloud Armor entirely.
+This module creates the security policy but does **not** attach it to any backend service. Every Service exposed through the Gateway needs a `GCPBackendPolicy` naming `security_policy_name`. A Service without one is served with no WAF at all.
 
 ### Rate limit is per-IP, per-minute
 
@@ -53,7 +63,7 @@ The rate limit applies independently to each source IP. `rate_limit_threshold = 
 
 | Name | Version |
 | ---- | ------- |
-| <a name="provider_google"></a> [google](#provider\_google) | 7.35.0 |
+| <a name="provider_google"></a> [google](#provider\_google) | >= 5.0.0 |
 
 ## Modules
 

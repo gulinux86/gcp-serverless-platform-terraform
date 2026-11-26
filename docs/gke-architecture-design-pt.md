@@ -1,5 +1,7 @@
 # Design: variante GKE Standard da plataforma (exercício de arquitetura)
 
+> **Implementado.** Este design virou o próprio repositório — ver [ARCHITECTURE.md](../ARCHITECTURE.md). Diferenças em relação ao rascunho: duas camadas (`foundation` com rede + cluster, `workload` com dados + Argo CD) em vez de três, para reaproveitar as pipelines do `eks-terraform`; acesso ao control plane pelo endpoint DNS autorizado por IAM; secret rotation removida junto com o Cloud Run Job.
+
 > Como ficaria a mesma aplicação (frontend + backend API + PostgreSQL) trocando Cloud Run por **GKE Standard**, mantendo a postura de segurança e o modelo multi-ambiente. Material de entrevista.
 
 ---

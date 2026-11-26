@@ -27,3 +27,15 @@ resource "google_service_account_iam_member" "this" {
   member             = each.key
 }
 
+
+# GKE Workload Identity: lets the listed Kubernetes service accounts act as this
+# Google service account, with no exported key. The KSA must also carry the
+# annotation iam.gke.io/gcp-service-account=<this SA's email> (done in the Helm
+# chart, in Git) — the binding here is the half only IAM can grant.
+resource "google_service_account_iam_member" "workload_identity" {
+  for_each = toset(var.workload_identity_ksas)
+
+  service_account_id = google_service_account.this.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "serviceAccount:${var.workload_identity_pool}[${each.value}]"
+}

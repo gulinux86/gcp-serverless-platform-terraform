@@ -1,0 +1,58 @@
+# Formatting and configuration validity, credential-free.
+#
+# This exists to run BEFORE anything impersonates a GCP service account. `validate` with
+# `-backend=false` needs no credentials, no state and no network: it checks that the
+# HCL parses, that types line up, and that every reference resolves. Code that fails
+# here would fail a plan too, having first assumed an identity for nothing.
+#
+# It also closes a gap in the deploy path. The module suites only `fmt` the modules
+# that have tests, so the layer roots — foundation/*.tf, workload/*.tf — were never
+# checked before an apply. A malformed root would reach the apply step and fail there,
+# after the deployer SA was impersonated.
+name: _terraform-validate
+
+on:
+  workflow_call:
+    inputs:
+      layers:
+        description: JSON array of layer directories to validate, e.g. '["foundation","workload"]'.
+        type: string
+        required: true
+      # Exact, not a range. `~> 1.10` resolved to whatever 1.x was newest on the day
+      # of the run, so plan and apply could run different binaries with no diff in
+      # this repository. The provider lockfile pins providers, not the CLI. Bump
+      # every occurrence together: grep -rn 'terraform-version' .github/
+      terraform-version:
+        type: string
+        required: false
+        default: "1.17.2"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: ${{ fromJson(inputs.layers) }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      # Whole repository, not just this layer: formatting is not per-directory, and
+      # running it once per layer is cheap enough to not be worth narrowing.
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      # -backend=false is what keeps this credential-free. A real init would reach
+      # GCS for the state, and the point is to fail before any identity is assumed.
+      - name: Terraform init (no backend)
+        run: terraform -chdir=${{ matrix.layer }} init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform -chdir=${{ matrix.layer }} validate
